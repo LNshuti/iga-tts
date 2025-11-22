@@ -1,15 +1,3 @@
----
-title: Iga TTS - Learn Kinyarwanda
-emoji: 🌍
-colorFrom: green
-colorTo: blue
-sdk: gradio
-sdk_version: 4.44.0
-app_file: app.py
-pinned: false
-license: mit
----
-
 # **Iga**: Multilingual translator between English, French, and Kinyarwanda. 
 
 - We use sythentic audio for target phrase using a Transformers TTS model (default: suno/bark-small for speed)
