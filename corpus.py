@@ -2,7 +2,7 @@
 Intelligent corpus loader for phrase management.
 Provides categorization, search, filtering, and context-aware suggestions.
 """
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Any
 from pathlib import Path
 from collections import defaultdict
 import re
@@ -20,7 +20,7 @@ class Phrase:
         category: Optional[str] = None,
         difficulty: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict[str, Any]] = None
     ):
         self.text = text.strip()
         self.language = language.lower()

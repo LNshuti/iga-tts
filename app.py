@@ -3,7 +3,7 @@ Iga TTS - Learn Kinyarwanda
 Enterprise-grade multilingual learning app with translation and text-to-speech.
 """
 import gradio as gr
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 import traceback
 
 from translation import translate
@@ -53,7 +53,7 @@ def do_translate(text: str, src: str, tgt: str) -> str:
         return f"❌ {error_msg}"
 
 
-def do_tts(text: str) -> Optional[Tuple[int, any]]:
+def do_tts(text: str) -> Optional[Tuple[int, Any]]:
     """
     Generate speech with error handling.
 
@@ -290,6 +290,7 @@ with gr.Blocks(
 if __name__ == "__main__":
     logger.info("Launching Gradio interface...")
     demo.launch(
+        server_name="0.0.0.0",
         server_port=Config.SERVER_PORT,
         share=Config.SHARE
     )
