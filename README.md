@@ -1,4 +1,4 @@
-# **Iga**: Multilingual web app that translates knowledge between English, French, and Kinyarwanda (rw)
+# **Iga**: Multilingual translator between English, French, and Kinyarwanda. 
 
 - We use sythentic audio for target phrase using a Transformers TTS model (default: suno/bark-small for speed)
 
