@@ -1,3 +1,9 @@
+---
+title: iga-tts
+app_file: app.py
+sdk: gradio
+sdk_version: 4.44.1
+---
 # **Iga**: Multilingual translator between English, French, and Kinyarwanda. 
 
 - We use sythentic audio for target phrases using a Transformers TTS model (default: suno/bark-small for speed)
