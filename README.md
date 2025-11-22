@@ -1,6 +1,6 @@
 # **Iga**: Multilingual translator between English, French, and Kinyarwanda. 
 
-- We use sythentic audio for target phrase using a Transformers TTS model (default: suno/bark-small for speed)
+- We use sythentic audio for target phrases using a Transformers TTS model (default: suno/bark-small for speed)
 - The app has two learning modes (Rwanda/Burundi Mode and Diaspora Mode)
 - The app is deployed to Hugging Face Spaces with a Gradio UI and an auto-exposed Inference API
 - Includes example code to use the TTS from the Transformers library directly
