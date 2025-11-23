@@ -1,7 +1,7 @@
 transformers>=4.43.0
 accelerate>=0.33.0
 torch
-gradio>=4.44.0
+gradio==4.43.0
 sentencepiece
 sacremoses
 numpy

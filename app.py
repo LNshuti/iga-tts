@@ -103,11 +103,7 @@ except Exception as e:
     logger.warning("Using fallback hardcoded phrases")
 
 
-with gr.Blocks(
-    title="Learn Kinyarwanda — Iga TTS",
-    theme=gr.themes.Soft(),
-    css=".gradio-container {max-width: 900px; margin: auto;}"
-) as demo:
+with gr.Blocks() as demo:
     gr.Markdown(
         """
         # 🌍 Learn Kinyarwanda — Iga TTS
@@ -140,7 +136,7 @@ with gr.Blocks(
                 info="Auto-updated by mode"
             )
 
-        mode.change(on_mode_change, inputs=mode, outputs=[src, tgt])
+        mode.change(on_mode_change, inputs=mode, outputs=[src, tgt], api_name=False)
 
         with gr.Row():
             inp = gr.Textbox(
@@ -224,8 +220,8 @@ with gr.Blocks(
                 logger.error(f"Failed to update phrases: {e}")
                 return gr.update(choices=[], value=None)
 
-        pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase])
-        lang_for_pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase])
+        pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
+        lang_for_pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
 
         def translate_pack_phrase(lang: str, phr: str, tgt_lang: str) -> str:
             """Translate selected phrase."""
@@ -266,8 +262,6 @@ with gr.Blocks(
             - XP/streaks are non-persistent (this is a prototype)
 
             ---
-
-            **Built with ❤️ for language learners**
             """
         )
 
@@ -292,5 +286,6 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
         server_port=Config.SERVER_PORT,
-        share=Config.SHARE
+        share=Config.SHARE,
+        show_api=False  # Disable API docs to avoid gradio_client bug
     )

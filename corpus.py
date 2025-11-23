@@ -300,7 +300,8 @@ class CorpusLoader:
                 if lang not in result[category]:
                     result[category][lang] = []
 
-        return dict(result)
+        # Convert nested defaultdicts to regular dicts
+        return {cat: dict(langs) for cat, langs in result.items()}
 
     def record_usage(self, text: str, language: str) -> None:
         """Record usage of a phrase for analytics."""
