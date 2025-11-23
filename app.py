@@ -9,7 +9,10 @@ import traceback
 from translation import translate
 from tts import synthesize
 from corpus import get_corpus
+from feedback_storage import get_feedback_storage
 from config import Config, logger, TranslationError, TTSError
+import numpy as np
+from datetime import datetime
 
 # Validate configuration on startup
 if not Config.validate():
@@ -267,6 +270,116 @@ with gr.Blocks() as demo:
             outputs=[translated]
         )
         btn_tts2.click(do_tts, inputs=[translated], outputs=[audio2])
+
+    with gr.Tab("🎤 Feedback"):
+        gr.Markdown("""
+        ## Share Your Feedback
+
+        Record your pronunciation practice or general feedback about the app.
+        Your recordings are encrypted and securely stored for learning analytics.
+
+        **Privacy Notice:** Audio is encrypted with AES-256 before storage.
+        """)
+
+        with gr.Row():
+            feedback_type = gr.Radio(
+                choices=["Pronunciation Practice", "General Feedback"],
+                value="Pronunciation Practice",
+                label="Feedback Type"
+            )
+
+        with gr.Row():
+            feedback_domain = gr.Dropdown(
+                choices=sorted(corpus.categories) if corpus.categories else ["General"],
+                value="General",
+                label="Learning Domain (Optional)"
+            )
+
+        feedback_phrase = gr.Textbox(
+            label="Phrase Being Practiced (Optional)",
+            placeholder="Enter the phrase you're practicing...",
+            lines=2
+        )
+
+        feedback_notes = gr.Textbox(
+            label="Additional Notes (Optional)",
+            placeholder="Any comments or context for this recording?",
+            lines=2
+        )
+
+        gr.Markdown("### Record Audio")
+        audio_input = gr.Audio(
+            label="🎙️ Click to Record",
+            type="numpy",
+            sources=["microphone"]
+        )
+
+        feedback_status = gr.Textbox(
+            label="Status",
+            interactive=False,
+            lines=2
+        )
+
+        def process_feedback(
+            audio_data: Tuple[int, np.ndarray],
+            feedback_type_val: str,
+            domain_val: str,
+            phrase_val: str,
+            notes_val: str
+        ) -> str:
+            """Process and store feedback."""
+            try:
+                if audio_data is None:
+                    return "⚠️ No audio recorded. Please record something."
+
+                sample_rate, audio_array = audio_data
+
+                # Convert to bytes (16-bit PCM)
+                audio_int16 = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
+                audio_bytes = audio_int16.tobytes()
+
+                # Calculate duration and quality score
+                duration = len(audio_array) / sample_rate
+
+                # Simple quality metric: check for clipping/distortion
+                max_val = np.max(np.abs(audio_array))
+                quality_score = min(1.0, max(0.0, 1.0 - (max(0, max_val - 0.95) * 2)))
+
+                # Map feedback type
+                feedback_type_mapped = "pronunciation" if "Pronunciation" in feedback_type_val else "general"
+
+                # Submit to storage
+                feedback_storage = get_feedback_storage()
+                feedback_id = feedback_storage.submit_feedback(
+                    audio_bytes=audio_bytes,
+                    feedback_type=feedback_type_mapped,
+                    domain=domain_val if domain_val != "General" else None,
+                    phrase_text=phrase_val if phrase_val.strip() else None,
+                    duration_seconds=duration,
+                    audio_quality_score=quality_score,
+                    notes=notes_val if notes_val.strip() else None
+                )
+
+                return (
+                    f"✅ **Feedback Recorded Successfully!**\n\n"
+                    f"**Recording ID:** {feedback_id}\n"
+                    f"**Duration:** {duration:.1f} seconds\n"
+                    f"**Quality Score:** {quality_score:.1%}\n"
+                    f"**Type:** {feedback_type_mapped}\n"
+                    f"**Domain:** {domain_val}\n\n"
+                    f"Thank you for your feedback!"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to process feedback: {e}")
+                return f"❌ Error: {str(e)}"
+
+        btn_submit_feedback = gr.Button("💾 Submit Feedback", variant="primary")
+        btn_submit_feedback.click(
+            process_feedback,
+            inputs=[audio_input, feedback_type, feedback_domain, feedback_phrase, feedback_notes],
+            outputs=[feedback_status]
+        )
 
     with gr.Tab("🗂️ Learning Domains"):
         gr.Markdown("""
