@@ -27,6 +27,25 @@ MODES = {
     "Diaspora Mode (EN/FR → Kinyarwanda)": ("en", "rw"),
 }
 
+# Domain metadata with emojis
+DOMAIN_EMOJIS = {
+    "Greetings": "👋",
+    "Travel": "✈️",
+    "Food": "🍔",
+    "Work": "💼",
+    "Health": "⚕️",
+    "Education": "🎓",
+    "Social": "👥",
+    "Emotions": "❤️",
+    "Numbers": "🔢",
+    "Shopping": "🛒",
+    "Time": "⏰",
+    "Family": "👨‍👩‍👧‍👦",
+    "Questions": "❓",
+    "Activities": "⚽",
+    "General": "📝",
+}
+
 
 def do_translate(text: str, src: str, tgt: str) -> str:
     """
@@ -176,43 +195,56 @@ with gr.Blocks() as demo:
         btn_tts.click(do_tts, inputs=[out], outputs=[audio])
 
     with gr.Tab("📦 Phrase Packs"):
-        gr.Markdown("**Quick-start with curated phrases from the corpus**")
-
-        pack = gr.Dropdown(
-            choices=list(PHRASE_PACKS.keys()),
-            value=list(PHRASE_PACKS.keys())[0] if PHRASE_PACKS else None,
-            label="Category"
-        )
-        lang_for_pack = gr.Dropdown(
-            choices=LANGS,
-            value="en",
-            label="Phrase Language"
-        )
-        phrase = gr.Dropdown(
-            choices=[],
-            label="Select Phrase"
-        )
+        gr.Markdown("""
+        **Organized by Domain** — Browse curated phrases grouped by real-world contexts.
+        """)
 
         with gr.Row():
+            # Domain selection with emoji labels
+            domain_choices = [f"{DOMAIN_EMOJIS.get(d, '📝')} {d}" for d in sorted(PHRASE_PACKS.keys())]
+            domain_choice_map = {label: domain for label, domain in zip(domain_choices, sorted(PHRASE_PACKS.keys()))}
+
+            pack = gr.Dropdown(
+                choices=domain_choices,
+                value=domain_choices[0] if domain_choices else None,
+                label="📚 Learning Domain",
+                info="Choose a domain to explore phrases"
+            )
+
+        with gr.Row():
+            lang_for_pack = gr.Dropdown(
+                choices=LANGS,
+                value="en",
+                label="Phrase Language"
+            )
             tgt_pack = gr.Dropdown(
                 choices=LANGS,
                 value="rw",
                 label="Translate To"
             )
 
-        translated = gr.Textbox(label="Translation", lines=2)
+        phrase = gr.Dropdown(
+            choices=[],
+            label="Select a Phrase from This Domain",
+            interactive=True
+        )
+
+        translated = gr.Textbox(label="Translation", lines=2, interactive=False)
 
         with gr.Row():
             btn_translate2 = gr.Button("🔄 Translate", variant="primary")
-            btn_tts2 = gr.Button("🔊 Speak")
+            btn_tts2 = gr.Button("🔊 Speak Translation")
 
         audio2 = gr.Audio(label="Synthesized Speech", type="numpy")
 
-        def update_phrases(cat: str, lang: str):
-            """Update available phrases based on category and language."""
+        def update_phrases_with_emoji(pack_with_emoji: str, lang: str):
+            """Update available phrases based on domain and language."""
             try:
-                if cat in PHRASE_PACKS and lang in PHRASE_PACKS[cat]:
-                    choices = PHRASE_PACKS[cat][lang]
+                # Extract domain from emoji label
+                domain = domain_choice_map.get(pack_with_emoji, "General")
+
+                if domain in PHRASE_PACKS and lang in PHRASE_PACKS[domain]:
+                    choices = PHRASE_PACKS[domain][lang]
                     if choices:
                         return gr.update(choices=choices, value=choices[0])
                 return gr.update(choices=[], value=None)
@@ -220,8 +252,8 @@ with gr.Blocks() as demo:
                 logger.error(f"Failed to update phrases: {e}")
                 return gr.update(choices=[], value=None)
 
-        pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
-        lang_for_pack.change(update_phrases, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
+        pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
+        lang_for_pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
 
         def translate_pack_phrase(lang: str, phr: str, tgt_lang: str) -> str:
             """Translate selected phrase."""
@@ -236,6 +268,44 @@ with gr.Blocks() as demo:
         )
         btn_tts2.click(do_tts, inputs=[translated], outputs=[audio2])
 
+    with gr.Tab("🗂️ Learning Domains"):
+        gr.Markdown("""
+        ## 📚 Domain-Based Learning
+
+        Phrases are intelligently organized into domains for context-based learning.
+        Each domain focuses on a real-world topic with curated vocabulary and examples.
+        """)
+
+        # Get corpus stats
+        try:
+            corpus_obj = get_corpus()
+            stats = corpus_obj.get_stats()
+
+            # Display domain summary
+            domain_info = []
+            for domain in sorted(stats.get("categories", [])):
+                count = stats.get("by_domain", {}).get(domain, 0)
+                emoji = DOMAIN_EMOJIS.get(domain, "📝")
+                domain_info.append(f"{emoji} **{domain}** — {count} phrases")
+
+            gr.Markdown("### Available Domains\n\n" + "\n\n".join(domain_info))
+
+            # Overall statistics
+            gr.Markdown(f"""
+            ### Corpus Statistics
+
+            - **Total Phrases**: {stats['total_phrases']}
+            - **Domains**: {len(stats['categories'])}
+            - **Languages**: {', '.join(stats['languages'])}
+            - **Difficulty Distribution**:
+              - Beginner: {stats['by_difficulty'].get('beginner', 0)} phrases
+              - Intermediate: {stats['by_difficulty'].get('intermediate', 0)} phrases
+              - Advanced: {stats['by_difficulty'].get('advanced', 0)} phrases
+            """)
+        except Exception as e:
+            logger.error(f"Failed to load domain statistics: {e}")
+            gr.Markdown("⚠️ Could not load domain statistics")
+
     with gr.Tab("ℹ️ About"):
         gr.Markdown(
             """
@@ -247,13 +317,16 @@ with gr.Blocks() as demo:
             - 🔄 **Offline Translation** — MarianMT models for en↔rw, fr↔rw
             - 🔊 **Text-to-Speech** — Natural pronunciation with Bark
             - 🎯 **Two Learning Modes** — Rwanda Mode & Diaspora Mode
-            - 📦 **Phrase Packs** — Curated phrases by category
+            - 🗂️ **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
+            - 📦 **Phrase Packs** — 1,000+ curated phrases organized by context
             - 🎮 **Gamification** — XP and streaks (prototype)
+            - 📚 **Spaced Repetition Ready** — Infrastructure for SRS scheduling
 
             ### Technology
             - **Translation:** Helsinki-NLP MarianMT
             - **TTS:** Suno Bark (small model)
             - **Framework:** Gradio + Transformers
+            - **Corpus:** DuckDB with intelligent domain classification
             - **Deployment:** Hugging Face Spaces
 
             ### Limitations
@@ -286,7 +359,8 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
         server_port=Config.SERVER_PORT,
-        share=Config.SHARE,
-        show_api=False  # Disable API docs to avoid gradio_client bug
+        share=Config.SHARE
     )
+
+
 
