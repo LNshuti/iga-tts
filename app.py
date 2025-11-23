@@ -5,12 +5,18 @@ Enterprise-grade multilingual learning app with translation and text-to-speech.
 import gradio as gr
 from typing import Tuple, Optional, Any
 import traceback
+import json
+import uuid
+import time
 
 from translation import translate
 from tts import synthesize
 from corpus import get_corpus
 from feedback_storage import get_feedback_storage
 from config import Config, logger, TranslationError, TTSError
+from bayesian_optimizer import AxOptimizer
+from ab_test_logging import ABTestLogger
+from variant_manager import VariantManager
 import numpy as np
 from datetime import datetime
 
@@ -117,8 +123,28 @@ except Exception as e:
     from phrases import PHRASE_PACKS
     logger.warning("Using fallback hardcoded phrases")
 
+# Initialize A/B testing components
+try:
+    ab_logger = ABTestLogger(db_path="ab_test.db")
+    optimizer = AxOptimizer(db_logger=ab_logger)
+    variant_manager = VariantManager(ab_logger)
+    logger.info("Initialized Bayesian A/B testing framework")
+except Exception as e:
+    logger.error(f"Failed to initialize A/B testing: {e}", exc_info=True)
+    ab_logger = None
+    optimizer = None
+    variant_manager = None
+    logger.warning("A/B testing disabled due to initialization failure")
+
 
 with gr.Blocks() as demo:
+    # Session management for A/B testing
+    session_id = gr.State(str(uuid.uuid4()))  # Anonymous session ID
+    session_start = gr.State(time.time())
+    session_phrases_count = gr.State(0)
+    session_xp_earned = gr.State(0)
+    current_variant = gr.State({})
+
     gr.Markdown(
         """
         # Learn Kinyarwanda — Iga TTS
@@ -251,16 +277,59 @@ with gr.Blocks() as demo:
         pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
         lang_for_pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
 
-        def translate_pack_phrase(lang: str, phr: str, tgt_lang: str) -> str:
-            """Translate selected phrase."""
+        def translate_pack_phrase(
+            lang: str, phr: str, tgt_lang: str, sess_id: str, variant: dict,
+            phrase_count: int, xp: int
+        ) -> Tuple[str, int, dict]:
+            """Translate selected phrase and log metrics for A/B testing."""
             if not phr:
-                return ""
-            return do_translate(phr, lang, tgt_lang)
+                return "", phrase_count, variant
+
+            phrase_start = time.time()
+            translation = do_translate(phr, lang, tgt_lang)
+            duration_ms = int((time.time() - phrase_start) * 1000)
+
+            # Determine if translation was successful
+            success = translation and not translation.startswith("❌")
+
+            # Award XP for successful translation
+            new_xp = xp + (5 if success else 0)
+
+            # Ensure user has variant assignment
+            if not variant and ab_logger and optimizer and variant_manager:
+                try:
+                    variant = variant_manager.get_or_assign_user_variant(sess_id, optimizer)
+                except Exception as e:
+                    logger.warning(f"Failed to assign variant: {e}")
+                    variant = {}
+
+            # Log phrase attempt to A/B testing
+            if ab_logger and variant:
+                try:
+                    ab_logger.log_phrase_attempt(
+                        user_id=sess_id,
+                        variant_id=json.dumps(variant),
+                        phrase=phr,
+                        duration_ms=duration_ms,
+                        success=success,
+                    )
+
+                    # Every 10 phrases, update posterior and increment session
+                    new_count = phrase_count + 1
+                    if new_count % 10 == 0 and optimizer:
+                        metrics = ab_logger.get_metrics_for_optimization()
+                        optimizer.update_posterior(metrics)
+
+                except Exception as e:
+                    logger.warning(f"Failed to log phrase attempt: {e}")
+
+            return translation, phrase_count + 1, variant
 
         btn_translate2.click(
             translate_pack_phrase,
-            inputs=[lang_for_pack, phrase, tgt_pack],
-            outputs=[translated]
+            inputs=[lang_for_pack, phrase, tgt_pack, session_id, current_variant,
+                   session_phrases_count, session_xp_earned],
+            outputs=[translated, session_phrases_count, current_variant]
         )
         btn_tts2.click(do_tts, inputs=[translated], outputs=[audio2])
 
@@ -411,6 +480,79 @@ with gr.Blocks() as demo:
         except Exception as e:
             logger.error(f"Failed to load domain statistics: {e}")
             gr.Markdown("⚠️ Could not load domain statistics")
+
+    with gr.Tab("📊 A/B Testing Results"):
+        gr.Markdown("""
+        ## Bayesian Curriculum Optimization
+
+        Real-time view of A/B test results. The system is continuously learning which
+        curriculum variations lead to better engagement, retention, and satisfaction.
+        """)
+
+        def get_ab_results():
+            """Fetch current A/B test results."""
+            if not optimizer or not ab_logger:
+                return {}, [], ""
+
+            try:
+                summary = optimizer.get_experiment_summary()
+                metrics = ab_logger.get_metrics_summary()
+
+                result_text = f"""
+                ### Optimization Status
+                - **Total Variants**: {summary['num_arms']} active arms
+                - **Parameters**: {summary['num_parameters']} dimensions
+                - **Best Variant**: {json.dumps(summary['best_arm'], indent=2) if summary['best_arm'] else 'Computing...'}
+                """
+
+                return summary, metrics, result_text
+
+            except Exception as e:
+                logger.error(f"Failed to get A/B results: {e}")
+                return {}, [], f"❌ Error loading results: {str(e)}"
+
+        with gr.Row():
+            btn_refresh = gr.Button("🔄 Refresh Results", variant="primary")
+            btn_export = gr.Button("📥 Export Data")
+
+        summary_text = gr.Markdown("Loading results...")
+        metrics_table = gr.Dataframe(
+            headers=["Variant", "Engagement", "Retention", "Satisfaction", "Sample Size"],
+            value=[],
+            interactive=False,
+            label="Metrics by Variant"
+        )
+
+        def refresh_results():
+            """Refresh A/B test results."""
+            summary, metrics, text = get_ab_results()
+            return text, metrics
+
+        def export_results():
+            """Export A/B test metrics to CSV."""
+            try:
+                if ab_logger:
+                    ab_logger.export_to_csv("ab_test_export.csv")
+                    return "✅ Exported to ab_test_export.csv"
+                return "❌ A/B testing not initialized"
+            except Exception as e:
+                return f"❌ Export failed: {str(e)}"
+
+        btn_refresh.click(
+            refresh_results,
+            outputs=[summary_text, metrics_table],
+            api_name=False
+        )
+        btn_export.click(
+            export_results,
+            outputs=gr.Textbox(label="Status", interactive=False),
+            api_name=False
+        )
+
+        # Initial load
+        summary, metrics, text = get_ab_results()
+        summary_text.value = text
+        metrics_table.value = metrics
 
     with gr.Tab("ℹ️ About"):
         gr.Markdown(
