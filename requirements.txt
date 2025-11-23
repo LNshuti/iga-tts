@@ -7,3 +7,4 @@ sacremoses
 numpy
 soundfile
 pytest>=7.0.0
+evaluate>=0.4.0

@@ -99,6 +99,138 @@ class TestTranslation:
         with pytest.raises(TranslationError):
             translate("Hello", "invalid", "en")
 
+    def test_nllb_model_loader_creation(self):
+        """Test NLLB model loader can be instantiated."""
+        from translation import NLLBModelLoader
+
+        loader = NLLBModelLoader()
+        assert loader is not None
+        assert hasattr(loader, 'load_translator')
+
+    def test_nllb_supports_fr_rw_translation(self):
+        """Test NLLB can identify supported language pairs."""
+        from translation import NLLBModelLoader
+
+        loader = NLLBModelLoader()
+        assert loader.supports_language_pair("fr", "rw") is True
+        assert loader.supports_language_pair("rw", "fr") is True
+        assert loader.supports_language_pair("en", "rw") is True
+
+    def test_translation_model_manager_creation(self):
+        """Test translation model manager can be instantiated."""
+        from translation import TranslationModelManager
+
+        manager = TranslationModelManager()
+        assert manager is not None
+        assert hasattr(manager, 'get_best_translator')
+
+    def test_translation_uses_model_manager(self):
+        """Test translate function uses model manager for language pair selection."""
+        from translation import translate
+
+        # fr->en should use best available model (could be NLLB or MarianMT)
+        # As long as it doesn't error and returns a translation
+        result = translate("Bonjour", "fr", "en")
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert not result.startswith("❌")
+
+    def test_translation_quality_scorer_creation(self):
+        """Test translation quality scorer can be instantiated."""
+        from translation import TranslationQualityScorer
+
+        scorer = TranslationQualityScorer()
+        assert scorer is not None
+        assert hasattr(scorer, 'calculate_edit_distance')
+        assert hasattr(scorer, 'calculate_similarity_score')
+
+    def test_translation_quality_edit_distance(self):
+        """Test edit distance calculation."""
+        from translation import TranslationQualityScorer
+
+        scorer = TranslationQualityScorer()
+
+        # Identical strings
+        assert scorer.calculate_edit_distance("hello", "hello") == 0
+
+        # One insertion
+        assert scorer.calculate_edit_distance("hello", "hallo") == 1
+
+        # One deletion
+        assert scorer.calculate_edit_distance("hello", "helo") == 1
+
+        # Empty string
+        assert scorer.calculate_edit_distance("", "") == 0
+        assert scorer.calculate_edit_distance("hello", "") == 5
+
+    def test_translation_quality_similarity_score(self):
+        """Test similarity score calculation."""
+        from translation import TranslationQualityScorer
+
+        scorer = TranslationQualityScorer()
+
+        # Identical strings
+        assert scorer.calculate_similarity_score("hello", "hello") == 1.0
+
+        # Very different strings
+        score = scorer.calculate_similarity_score("abc", "xyz")
+        assert 0 <= score < 0.5
+
+        # Case insensitive
+        score1 = scorer.calculate_similarity_score("Hello", "hello")
+        score2 = scorer.calculate_similarity_score("hello", "hello")
+        assert score1 == score2
+
+    def test_nllb_language_codes_supported(self):
+        """Test that NLLB supports required language codes."""
+        from translation import NLLB_LANG_CODES
+
+        assert "en" in NLLB_LANG_CODES
+        assert "fr" in NLLB_LANG_CODES
+        assert "rw" in NLLB_LANG_CODES
+        assert NLLB_LANG_CODES["rw"] == "kin_Latn"
+        assert NLLB_LANG_CODES["fr"] == "fra_Latn"
+        assert NLLB_LANG_CODES["en"] == "eng_Latn"
+
+    def test_nllb_loader_get_lang_code(self):
+        """Test NLLB loader language code mapping."""
+        from translation import NLLBModelLoader
+
+        loader = NLLBModelLoader()
+        assert loader.get_nllb_lang_code("en") == "eng_Latn"
+        assert loader.get_nllb_lang_code("fr") == "fra_Latn"
+        assert loader.get_nllb_lang_code("rw") == "kin_Latn"
+
+    def test_ab_test_result_creation(self):
+        """Test A/B test result data structure."""
+        from translation import ABTestResult
+
+        result = ABTestResult(
+            text="Hello",
+            src="en",
+            tgt="rw",
+            model_a_translation="Muraho",
+            model_b_translation="Mwaramutse",
+            model_a_name="MarianMT",
+            model_b_name="NLLB",
+            quality_score_a=0.75,
+            quality_score_b=0.85
+        )
+        assert result.text == "Hello"
+        assert result.src == "en"
+        assert result.tgt == "rw"
+        assert result.model_a_translation == "Muraho"
+        assert result.model_b_translation == "Mwaramutse"
+        assert result.quality_score_b > result.quality_score_a
+
+    def test_ab_test_comparison_runner(self):
+        """Test A/B test comparison runner."""
+        from translation import ABTestComparisonRunner
+
+        runner = ABTestComparisonRunner()
+        assert runner is not None
+        assert hasattr(runner, 'run_comparison')
+
 
 class TestTTS:
     """Test TTS module."""

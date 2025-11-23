@@ -289,3 +289,4 @@ if __name__ == "__main__":
         share=Config.SHARE,
         show_api=False  # Disable API docs to avoid gradio_client bug
     )
+
