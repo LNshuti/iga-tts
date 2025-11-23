@@ -33,7 +33,6 @@ MODES = {
 # Domain metadata with emojis
 DOMAIN_EMOJIS = {
     "Greetings": "👋",
-    "Travel": "✈️",
     "Food": "🍔",
     "Work": "💼",
     "Health": "⚕️",
@@ -41,12 +40,8 @@ DOMAIN_EMOJIS = {
     "Social": "👥",
     "Emotions": "❤️",
     "Numbers": "🔢",
-    "Shopping": "🛒",
     "Time": "⏰",
     "Family": "👨‍👩‍👧‍👦",
-    "Questions": "❓",
-    "Activities": "⚽",
-    "General": "📝",
 }
 
 
@@ -128,7 +123,7 @@ except Exception as e:
 with gr.Blocks() as demo:
     gr.Markdown(
         """
-        # 🌍 Learn Kinyarwanda — Iga TTS
+        # Learn Kinyarwanda — Iga TTS
 
         **Gamified language learning with AI-powered translation and text-to-speech.**
 
@@ -136,7 +131,7 @@ with gr.Blocks() as demo:
         """
     )
 
-    with gr.Tab("📚 Learn"):
+    with gr.Tab("Learn"):
         mode = gr.Dropdown(
             choices=list(MODES.keys()),
             value=list(MODES.keys())[0],
@@ -172,8 +167,8 @@ with gr.Blocks() as demo:
             )
 
         with gr.Row():
-            btn_translate = gr.Button("🔄 Translate", variant="primary")
-            btn_tts = gr.Button("🔊 Speak Translation")
+            btn_translate = gr.Button("Translate", variant="primary")
+            btn_tts = gr.Button("Speak Translation")
 
         audio = gr.Audio(label="Synthesized Speech", type="numpy")
 
@@ -235,8 +230,8 @@ with gr.Blocks() as demo:
         translated = gr.Textbox(label="Translation", lines=2, interactive=False)
 
         with gr.Row():
-            btn_translate2 = gr.Button("🔄 Translate", variant="primary")
-            btn_tts2 = gr.Button("🔊 Speak Translation")
+            btn_translate2 = gr.Button("Translate", variant="primary")
+            btn_tts2 = gr.Button("Speak Translation")
 
         audio2 = gr.Audio(label="Synthesized Speech", type="numpy")
 
@@ -374,16 +369,16 @@ with gr.Blocks() as demo:
                 logger.error(f"Failed to process feedback: {e}")
                 return f"❌ Error: {str(e)}"
 
-        btn_submit_feedback = gr.Button("💾 Submit Feedback", variant="primary")
+        btn_submit_feedback = gr.Button("Submit Feedback", variant="primary")
         btn_submit_feedback.click(
             process_feedback,
             inputs=[audio_input, feedback_type, feedback_domain, feedback_phrase, feedback_notes],
             outputs=[feedback_status]
         )
 
-    with gr.Tab("🗂️ Learning Domains"):
+    with gr.Tab("Learning Domains"):
         gr.Markdown("""
-        ## 📚 Domain-Based Learning
+        ## Domain-Based Learning
 
         Phrases are intelligently organized into domains for context-based learning.
         Each domain focuses on a real-world topic with curated vocabulary and examples.
@@ -427,13 +422,13 @@ with gr.Blocks() as demo:
             **Iga** (Kinyarwanda for "learn") is an AI-powered language learning platform.
 
             ### Features
-            - 🔄 **Offline Translation** — MarianMT models for en↔rw, fr↔rw
-            - 🔊 **Text-to-Speech** — Natural pronunciation with Bark
-            - 🎯 **Two Learning Modes** — Rwanda Mode & Diaspora Mode
-            - 🗂️ **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
-            - 📦 **Phrase Packs** — 1,000+ curated phrases organized by context
-            - 🎮 **Gamification** — XP and streaks (prototype)
-            - 📚 **Spaced Repetition Ready** — Infrastructure for SRS scheduling
+            - **Offline Translation** — MarianMT models for en↔rw, fr↔rw
+            - **Text-to-Speech** — Natural pronunciation with Bark
+            - **Two Learning Modes** — Rwanda Mode & Diaspora Mode
+            - **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
+            - **Phrase Packs** — 1,000+ curated phrases organized by context
+            - **Gamification** — XP and streaks (prototype)
+            - **Spaced Repetition Ready** — Infrastructure for SRS scheduling
 
             ### Technology
             - **Translation:** Helsinki-NLP MarianMT
