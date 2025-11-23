@@ -4,8 +4,10 @@ __pycache__/*
 CLAUDE.md
 .github/
 .github/*
-docs/plans*
-docs/plans/
-docs/plans/*
+# Allow committed design documents, ignore other plan files
+!docs/plans/
+!docs/plans/*.md
+docs/plans/*.tmp
+docs/plans/.cache/
 corpus.duckdb
 .worktrees/
