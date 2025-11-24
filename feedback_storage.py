@@ -32,7 +32,7 @@ class FeedbackRecord:
 class FeedbackStorage:
     """Manages audio feedback storage in DuckDB."""
 
-    def __init__(self, db_file: str = "corpus.duckdb"):
+    def __init__(self, db_file: str = "feedback.duckdb"):
         """Initialize with DuckDB connection."""
         self.db_file = db_file
         self.db: Optional[duckdb.DuckDBPyConnection] = None
