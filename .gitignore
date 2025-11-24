@@ -13,3 +13,4 @@ corpus.duckdb
 .worktrees/
 docs/plans/2025-11-22-smart-autocomplete-ui-design.md
 docs/plans/2025-11-23-microphone-pronunciation-feedback-design.md
+ab_test.db
