@@ -14,6 +14,12 @@ from tts import synthesize
 from corpus import get_corpus
 from feedback_storage import get_feedback_storage
 from config import Config, logger, TranslationError, TTSError
+from audio_utils import (
+    numpy_to_wav_16k,
+    pcm_bytes_to_wav,
+    save_temp_wav,
+    validate_audio_for_download,
+)
 from bayesian_optimizer import AxOptimizer
 from ab_test_logging import ABTestLogger
 from variant_manager import VariantManager
@@ -357,6 +363,20 @@ with gr.Blocks() as demo:
                 label="Learning Domain (Optional)"
             )
 
+        # Language selection for corpus tagging
+        with gr.Row():
+            feedback_language = gr.Dropdown(
+                choices=["rw", "rn", "en", "fr"],
+                value="rw",
+                label="Language Being Spoken",
+                info="rw=Kinyarwanda, rn=Kirundi, en=English, fr=French"
+            )
+            feedback_dialect = gr.Textbox(
+                label="Dialect/Variety (Optional)",
+                placeholder="e.g., Kigali, Northern, Southern...",
+                max_lines=1
+            )
+
         feedback_phrase = gr.Textbox(
             label="Phrase Being Practiced (Optional)",
             placeholder="Enter the phrase you're practicing...",
@@ -379,20 +399,26 @@ with gr.Blocks() as demo:
         feedback_status = gr.Textbox(
             label="Status",
             interactive=False,
-            lines=2
+            lines=3
         )
+
+        # Store last recording info for download
+        last_feedback_id = gr.State(None)
+        last_audio_data = gr.State(None)
 
         def process_feedback(
             audio_data: Tuple[int, np.ndarray],
             feedback_type_val: str,
             domain_val: str,
+            language_val: str,
+            dialect_val: str,
             phrase_val: str,
             notes_val: str
-        ) -> str:
-            """Process and store feedback."""
+        ) -> Tuple[str, Optional[int], Optional[Tuple[int, np.ndarray]]]:
+            """Process and store feedback, return ID and audio for download."""
             try:
                 if audio_data is None:
-                    return "⚠️ No audio recorded. Please record something."
+                    return "⚠️ No audio recorded. Please record something.", None, None
 
                 sample_rate, audio_array = audio_data
 
@@ -410,6 +436,13 @@ with gr.Blocks() as demo:
                 # Map feedback type
                 feedback_type_mapped = "pronunciation" if "Pronunciation" in feedback_type_val else "general"
 
+                # Build notes with language/dialect info
+                full_notes = f"lang:{language_val}"
+                if dialect_val and dialect_val.strip():
+                    full_notes += f"|dialect:{dialect_val.strip()}"
+                if notes_val and notes_val.strip():
+                    full_notes += f"|{notes_val.strip()}"
+
                 # Submit to storage
                 feedback_storage = get_feedback_storage()
                 feedback_id = feedback_storage.submit_feedback(
@@ -419,28 +452,147 @@ with gr.Blocks() as demo:
                     phrase_text=phrase_val if phrase_val.strip() else None,
                     duration_seconds=duration,
                     audio_quality_score=quality_score,
-                    notes=notes_val if notes_val.strip() else None
+                    notes=full_notes
                 )
 
-                return (
+                status_msg = (
                     f"✅ **Feedback Recorded Successfully!**\n\n"
                     f"**Recording ID:** {feedback_id}\n"
                     f"**Duration:** {duration:.1f} seconds\n"
                     f"**Quality Score:** {quality_score:.1%}\n"
-                    f"**Type:** {feedback_type_mapped}\n"
-                    f"**Domain:** {domain_val}\n\n"
-                    f"Thank you for your feedback!"
+                    f"**Language:** {language_val}\n"
+                    f"**Type:** {feedback_type_mapped}\n\n"
+                    f"Use the Recording ID to download later, or click 'Download Recording' below."
                 )
+
+                return status_msg, feedback_id, audio_data
 
             except Exception as e:
                 logger.error(f"Failed to process feedback: {e}")
-                return f"❌ Error: {str(e)}"
+                return f"❌ Error: {str(e)}", None, None
 
         btn_submit_feedback = gr.Button("Submit Feedback", variant="primary")
         btn_submit_feedback.click(
             process_feedback,
-            inputs=[audio_input, feedback_type, feedback_domain, feedback_phrase, feedback_notes],
-            outputs=[feedback_status]
+            inputs=[audio_input, feedback_type, feedback_domain, feedback_language,
+                    feedback_dialect, feedback_phrase, feedback_notes],
+            outputs=[feedback_status, last_feedback_id, last_audio_data]
+        )
+
+        # === DOWNLOAD SECTION ===
+        gr.Markdown("---")
+        gr.Markdown("### Download Your Recording")
+
+        with gr.Row():
+            btn_create_download = gr.Button("📥 Download Current Recording", variant="secondary")
+            download_file = gr.File(
+                label="Download Recording (16kHz WAV)",
+                file_types=[".wav"],
+                interactive=False
+            )
+
+        download_status = gr.Textbox(
+            label="Download Status",
+            interactive=False,
+            lines=1
+        )
+
+        def create_download(
+            audio_data: Optional[Tuple[int, np.ndarray]],
+            feedback_id: Optional[int]
+        ) -> Tuple[Optional[str], str]:
+            """Create downloadable WAV from current recording."""
+            try:
+                is_valid, error_msg = validate_audio_for_download(audio_data)
+                if not is_valid:
+                    return None, f"❌ {error_msg}"
+
+                sample_rate, audio_array = audio_data
+
+                # Convert to 16kHz mono WAV (corpus standard)
+                wav_bytes = numpy_to_wav_16k(audio_array, sample_rate)
+
+                # Save to temp file
+                filepath = save_temp_wav(wav_bytes, feedback_id)
+
+                msg = f"✅ WAV created (16 kHz mono). "
+                if error_msg:  # Warning message
+                    msg += error_msg
+
+                return filepath, msg
+
+            except Exception as e:
+                logger.error(f"Failed to create download: {e}")
+                return None, f"❌ Error creating download: {str(e)}"
+
+        btn_create_download.click(
+            create_download,
+            inputs=[last_audio_data, last_feedback_id],
+            outputs=[download_file, download_status]
+        )
+
+        # === RETRIEVE BY ID SECTION ===
+        gr.Markdown("### Retrieve Recording by ID")
+
+        with gr.Row():
+            retrieve_id_input = gr.Number(
+                label="Recording ID",
+                precision=0,
+                minimum=1,
+                info="Enter the Recording ID shown after submission"
+            )
+            btn_retrieve = gr.Button("🔍 Retrieve & Download", variant="secondary")
+
+        retrieve_file = gr.File(
+            label="Retrieved Recording",
+            file_types=[".wav"],
+            interactive=False
+        )
+        retrieve_status = gr.Textbox(
+            label="Retrieval Status",
+            interactive=False,
+            lines=1
+        )
+
+        def retrieve_by_id(feedback_id: Optional[float]) -> Tuple[Optional[str], str]:
+            """Retrieve and download recording by ID."""
+            try:
+                if not feedback_id or feedback_id < 1:
+                    return None, "⚠️ Please enter a valid Recording ID."
+
+                feedback_id_int = int(feedback_id)
+                feedback_storage = get_feedback_storage()
+                record = feedback_storage.get_feedback(feedback_id_int)
+
+                if not record:
+                    return None, f"❌ Recording ID {feedback_id_int} not found."
+
+                if not record.audio_data:
+                    return None, f"❌ Audio data unavailable for ID {feedback_id_int}."
+
+                # Convert PCM bytes to WAV
+                # Note: We stored at browser's sample rate, typically 48kHz
+                # Using 48kHz as default; ideally store original SR in DB
+                wav_bytes = pcm_bytes_to_wav(record.audio_data, sr=48000)
+
+                # Save to temp file
+                filepath = save_temp_wav(wav_bytes, feedback_id_int)
+
+                return filepath, (
+                    f"✅ Retrieved recording {feedback_id_int} | "
+                    f"Duration: {record.duration_seconds:.1f}s | "
+                    f"Domain: {record.domain or 'General'} | "
+                    f"Quality: {record.audio_quality_score:.0%}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to retrieve recording: {e}")
+                return None, f"❌ Error: {str(e)}"
+
+        btn_retrieve.click(
+            retrieve_by_id,
+            inputs=[retrieve_id_input],
+            outputs=[retrieve_file, retrieve_status]
         )
 
     with gr.Tab("Learning Domains"):
