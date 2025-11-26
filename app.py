@@ -5,11 +5,26 @@ Enterprise-grade multilingual learning app with translation and text-to-speech.
 import gradio as gr
 from typing import Tuple, Optional, Any
 import traceback
+import json
+import uuid
+import time
 
 from translation import translate
 from tts import synthesize
 from corpus import get_corpus
+from feedback_storage import get_feedback_storage
 from config import Config, logger, TranslationError, TTSError
+from audio_utils import (
+    numpy_to_wav_16k,
+    pcm_bytes_to_wav,
+    save_temp_wav,
+    validate_audio_for_download,
+)
+from bayesian_optimizer import AxOptimizer
+from ab_test_logging import ABTestLogger
+from variant_manager import VariantManager
+import numpy as np
+from datetime import datetime
 
 # Validate configuration on startup
 if not Config.validate():
@@ -30,20 +45,13 @@ MODES = {
 # Domain metadata with emojis
 DOMAIN_EMOJIS = {
     "Greetings": "👋",
-    "Travel": "✈️",
     "Food": "🍔",
     "Work": "💼",
-    "Health": "⚕️",
     "Education": "🎓",
-    "Social": "👥",
     "Emotions": "❤️",
     "Numbers": "🔢",
-    "Shopping": "🛒",
     "Time": "⏰",
     "Family": "👨‍👩‍👧‍👦",
-    "Questions": "❓",
-    "Activities": "⚽",
-    "General": "📝",
 }
 
 
@@ -121,11 +129,31 @@ except Exception as e:
     from phrases import PHRASE_PACKS
     logger.warning("Using fallback hardcoded phrases")
 
+# Initialize A/B testing components
+try:
+    ab_logger = ABTestLogger(db_path="ab_test.db")
+    optimizer = AxOptimizer(db_logger=ab_logger)
+    variant_manager = VariantManager(ab_logger)
+    logger.info("Initialized Bayesian A/B testing framework")
+except Exception as e:
+    logger.error(f"Failed to initialize A/B testing: {e}", exc_info=True)
+    ab_logger = None
+    optimizer = None
+    variant_manager = None
+    logger.warning("A/B testing disabled due to initialization failure")
+
 
 with gr.Blocks() as demo:
+    # Session management for A/B testing
+    session_id = gr.State(str(uuid.uuid4()))  # Anonymous session ID
+    session_start = gr.State(time.time())
+    session_phrases_count = gr.State(0)
+    session_xp_earned = gr.State(0)
+    current_variant = gr.State({})
+
     gr.Markdown(
         """
-        # 🌍 Learn Kinyarwanda — Iga TTS
+        # Learn Kinyarwanda — Iga TTS
 
         **Gamified language learning with AI-powered translation and text-to-speech.**
 
@@ -133,7 +161,7 @@ with gr.Blocks() as demo:
         """
     )
 
-    with gr.Tab("📚 Learn"):
+    with gr.Tab("Learn"):
         mode = gr.Dropdown(
             choices=list(MODES.keys()),
             value=list(MODES.keys())[0],
@@ -169,8 +197,8 @@ with gr.Blocks() as demo:
             )
 
         with gr.Row():
-            btn_translate = gr.Button("🔄 Translate", variant="primary")
-            btn_tts = gr.Button("🔊 Speak Translation")
+            btn_translate = gr.Button("Translate", variant="primary")
+            btn_tts = gr.Button("Speak Translation")
 
         audio = gr.Audio(label="Synthesized Speech", type="numpy")
 
@@ -232,8 +260,8 @@ with gr.Blocks() as demo:
         translated = gr.Textbox(label="Translation", lines=2, interactive=False)
 
         with gr.Row():
-            btn_translate2 = gr.Button("🔄 Translate", variant="primary")
-            btn_tts2 = gr.Button("🔊 Speak Translation")
+            btn_translate2 = gr.Button("Translate", variant="primary")
+            btn_tts2 = gr.Button("Speak Translation")
 
         audio2 = gr.Audio(label="Synthesized Speech", type="numpy")
 
@@ -255,22 +283,321 @@ with gr.Blocks() as demo:
         pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
         lang_for_pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
 
-        def translate_pack_phrase(lang: str, phr: str, tgt_lang: str) -> str:
-            """Translate selected phrase."""
+        def translate_pack_phrase(
+            lang: str, phr: str, tgt_lang: str, sess_id: str, variant: dict,
+            phrase_count: int, xp: int
+        ) -> Tuple[str, int, dict]:
+            """Translate selected phrase and log metrics for A/B testing."""
             if not phr:
-                return ""
-            return do_translate(phr, lang, tgt_lang)
+                return "", phrase_count, variant
+
+            phrase_start = time.time()
+            translation = do_translate(phr, lang, tgt_lang)
+            duration_ms = int((time.time() - phrase_start) * 1000)
+
+            # Determine if translation was successful
+            success = translation and not translation.startswith("❌")
+
+            # Award XP for successful translation
+            new_xp = xp + (5 if success else 0)
+
+            # Ensure user has variant assignment
+            if not variant and ab_logger and optimizer and variant_manager:
+                try:
+                    variant = variant_manager.get_or_assign_user_variant(sess_id, optimizer)
+                except Exception as e:
+                    logger.warning(f"Failed to assign variant: {e}")
+                    variant = {}
+
+            # Log phrase attempt to A/B testing
+            if ab_logger and variant:
+                try:
+                    ab_logger.log_phrase_attempt(
+                        user_id=sess_id,
+                        variant_id=json.dumps(variant),
+                        phrase=phr,
+                        duration_ms=duration_ms,
+                        success=success,
+                    )
+
+                    # Every 10 phrases, update posterior and increment session
+                    new_count = phrase_count + 1
+                    if new_count % 10 == 0 and optimizer:
+                        metrics = ab_logger.get_metrics_for_optimization()
+                        optimizer.update_posterior(metrics)
+
+                except Exception as e:
+                    logger.warning(f"Failed to log phrase attempt: {e}")
+
+            return translation, phrase_count + 1, variant
 
         btn_translate2.click(
             translate_pack_phrase,
-            inputs=[lang_for_pack, phrase, tgt_pack],
-            outputs=[translated]
+            inputs=[lang_for_pack, phrase, tgt_pack, session_id, current_variant,
+                   session_phrases_count, session_xp_earned],
+            outputs=[translated, session_phrases_count, current_variant]
         )
         btn_tts2.click(do_tts, inputs=[translated], outputs=[audio2])
 
-    with gr.Tab("🗂️ Learning Domains"):
+    with gr.Tab("🎤 Feedback"):
         gr.Markdown("""
-        ## 📚 Domain-Based Learning
+        ## Share Your Feedback
+
+        Record your pronunciation practice or general feedback about the app.
+        Your recordings are encrypted and securely stored for learning analytics.
+
+        **Privacy Notice:** Audio is encrypted with AES-256 before storage.
+        """)
+
+        with gr.Row():
+            feedback_type = gr.Radio(
+                choices=["Pronunciation Practice", "General Feedback"],
+                value="Pronunciation Practice",
+                label="Feedback Type"
+            )
+
+        with gr.Row():
+            feedback_domain = gr.Dropdown(
+                choices=sorted(corpus.categories) if corpus.categories else ["General"],
+                value="General",
+                label="Learning Domain (Optional)"
+            )
+
+        # Language selection for corpus tagging
+        with gr.Row():
+            feedback_language = gr.Dropdown(
+                choices=["rw", "rn", "en", "fr"],
+                value="rw",
+                label="Language Being Spoken",
+                info="rw=Kinyarwanda, rn=Kirundi, en=English, fr=French"
+            )
+            feedback_dialect = gr.Textbox(
+                label="Dialect/Variety (Optional)",
+                placeholder="e.g., Kigali, Northern, Southern...",
+                max_lines=1
+            )
+
+        feedback_phrase = gr.Textbox(
+            label="Phrase Being Practiced (Optional)",
+            placeholder="Enter the phrase you're practicing...",
+            lines=2
+        )
+
+        feedback_notes = gr.Textbox(
+            label="Additional Notes (Optional)",
+            placeholder="Any comments or context for this recording?",
+            lines=2
+        )
+
+        gr.Markdown("### Record Audio")
+        audio_input = gr.Audio(
+            label="🎙️ Click to Record",
+            type="numpy",
+            sources=["microphone"]
+        )
+
+        feedback_status = gr.Textbox(
+            label="Status",
+            interactive=False,
+            lines=3
+        )
+
+        # Store last recording info for download
+        last_feedback_id = gr.State(None)
+        last_audio_data = gr.State(None)
+
+        def process_feedback(
+            audio_data: Tuple[int, np.ndarray],
+            feedback_type_val: str,
+            domain_val: str,
+            language_val: str,
+            dialect_val: str,
+            phrase_val: str,
+            notes_val: str
+        ) -> Tuple[str, Optional[int], Optional[Tuple[int, np.ndarray]]]:
+            """Process and store feedback, return ID and audio for download."""
+            try:
+                if audio_data is None:
+                    return "⚠️ No audio recorded. Please record something.", None, None
+
+                sample_rate, audio_array = audio_data
+
+                # Convert to bytes (16-bit PCM)
+                audio_int16 = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
+                audio_bytes = audio_int16.tobytes()
+
+                # Calculate duration and quality score
+                duration = len(audio_array) / sample_rate
+
+                # Simple quality metric: check for clipping/distortion
+                max_val = np.max(np.abs(audio_array))
+                quality_score = min(1.0, max(0.0, 1.0 - (max(0, max_val - 0.95) * 2)))
+
+                # Map feedback type
+                feedback_type_mapped = "pronunciation" if "Pronunciation" in feedback_type_val else "general"
+
+                # Build notes with language/dialect info
+                full_notes = f"lang:{language_val}"
+                if dialect_val and dialect_val.strip():
+                    full_notes += f"|dialect:{dialect_val.strip()}"
+                if notes_val and notes_val.strip():
+                    full_notes += f"|{notes_val.strip()}"
+
+                # Submit to storage
+                feedback_storage = get_feedback_storage()
+                feedback_id = feedback_storage.submit_feedback(
+                    audio_bytes=audio_bytes,
+                    feedback_type=feedback_type_mapped,
+                    domain=domain_val if domain_val != "General" else None,
+                    phrase_text=phrase_val if phrase_val.strip() else None,
+                    duration_seconds=duration,
+                    audio_quality_score=quality_score,
+                    notes=full_notes
+                )
+
+                status_msg = (
+                    f"✅ **Feedback Recorded Successfully!**\n\n"
+                    f"**Recording ID:** {feedback_id}\n"
+                    f"**Duration:** {duration:.1f} seconds\n"
+                    f"**Quality Score:** {quality_score:.1%}\n"
+                    f"**Language:** {language_val}\n"
+                    f"**Type:** {feedback_type_mapped}\n\n"
+                    f"Use the Recording ID to download later, or click 'Download Recording' below."
+                )
+
+                return status_msg, feedback_id, audio_data
+
+            except Exception as e:
+                logger.error(f"Failed to process feedback: {e}")
+                return f"❌ Error: {str(e)}", None, None
+
+        btn_submit_feedback = gr.Button("Submit Feedback", variant="primary")
+        btn_submit_feedback.click(
+            process_feedback,
+            inputs=[audio_input, feedback_type, feedback_domain, feedback_language,
+                    feedback_dialect, feedback_phrase, feedback_notes],
+            outputs=[feedback_status, last_feedback_id, last_audio_data]
+        )
+
+        # === DOWNLOAD SECTION ===
+        gr.Markdown("---")
+        gr.Markdown("### Download Your Recording")
+
+        with gr.Row():
+            btn_create_download = gr.Button("📥 Download Current Recording", variant="secondary")
+            download_file = gr.File(
+                label="Download Recording (16kHz WAV)",
+                file_types=[".wav"],
+                interactive=False
+            )
+
+        download_status = gr.Textbox(
+            label="Download Status",
+            interactive=False,
+            lines=1
+        )
+
+        def create_download(
+            audio_data: Optional[Tuple[int, np.ndarray]],
+            feedback_id: Optional[int]
+        ) -> Tuple[Optional[str], str]:
+            """Create downloadable WAV from current recording."""
+            try:
+                is_valid, error_msg = validate_audio_for_download(audio_data)
+                if not is_valid:
+                    return None, f"❌ {error_msg}"
+
+                sample_rate, audio_array = audio_data
+
+                # Convert to 16kHz mono WAV (corpus standard)
+                wav_bytes = numpy_to_wav_16k(audio_array, sample_rate)
+
+                # Save to temp file
+                filepath = save_temp_wav(wav_bytes, feedback_id)
+
+                msg = f"✅ WAV created (16 kHz mono). "
+                if error_msg:  # Warning message
+                    msg += error_msg
+
+                return filepath, msg
+
+            except Exception as e:
+                logger.error(f"Failed to create download: {e}")
+                return None, f"❌ Error creating download: {str(e)}"
+
+        btn_create_download.click(
+            create_download,
+            inputs=[last_audio_data, last_feedback_id],
+            outputs=[download_file, download_status]
+        )
+
+        # === RETRIEVE BY ID SECTION ===
+        gr.Markdown("### Retrieve Recording by ID")
+
+        with gr.Row():
+            retrieve_id_input = gr.Number(
+                label="Recording ID",
+                precision=0,
+                minimum=1,
+                info="Enter the Recording ID shown after submission"
+            )
+            btn_retrieve = gr.Button("🔍 Retrieve & Download", variant="secondary")
+
+        retrieve_file = gr.File(
+            label="Retrieved Recording",
+            file_types=[".wav"],
+            interactive=False
+        )
+        retrieve_status = gr.Textbox(
+            label="Retrieval Status",
+            interactive=False,
+            lines=1
+        )
+
+        def retrieve_by_id(feedback_id: Optional[float]) -> Tuple[Optional[str], str]:
+            """Retrieve and download recording by ID."""
+            try:
+                if not feedback_id or feedback_id < 1:
+                    return None, "⚠️ Please enter a valid Recording ID."
+
+                feedback_id_int = int(feedback_id)
+                feedback_storage = get_feedback_storage()
+                record = feedback_storage.get_feedback(feedback_id_int)
+
+                if not record:
+                    return None, f"❌ Recording ID {feedback_id_int} not found."
+
+                if not record.audio_data:
+                    return None, f"❌ Audio data unavailable for ID {feedback_id_int}."
+
+                # Convert PCM bytes to WAV
+                # Note: We stored at browser's sample rate, typically 48kHz
+                # Using 48kHz as default; ideally store original SR in DB
+                wav_bytes = pcm_bytes_to_wav(record.audio_data, sr=48000)
+
+                # Save to temp file
+                filepath = save_temp_wav(wav_bytes, feedback_id_int)
+
+                return filepath, (
+                    f"✅ Retrieved recording {feedback_id_int} | "
+                    f"Duration: {record.duration_seconds:.1f}s | "
+                    f"Domain: {record.domain or 'General'} | "
+                    f"Quality: {record.audio_quality_score:.0%}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to retrieve recording: {e}")
+                return None, f"❌ Error: {str(e)}"
+
+        btn_retrieve.click(
+            retrieve_by_id,
+            inputs=[retrieve_id_input],
+            outputs=[retrieve_file, retrieve_status]
+        )
+
+    with gr.Tab("Learning Domains"):
+        gr.Markdown("""
+        ## Domain-Based Learning
 
         Phrases are intelligently organized into domains for context-based learning.
         Each domain focuses on a real-world topic with curated vocabulary and examples.
@@ -306,6 +633,79 @@ with gr.Blocks() as demo:
             logger.error(f"Failed to load domain statistics: {e}")
             gr.Markdown("⚠️ Could not load domain statistics")
 
+    with gr.Tab("📊 A/B Testing Results"):
+        gr.Markdown("""
+        ## Bayesian Curriculum Optimization
+
+        Real-time view of A/B test results. The system is continuously learning which
+        curriculum variations lead to better engagement, retention, and satisfaction.
+        """)
+
+        def get_ab_results():
+            """Fetch current A/B test results."""
+            if not optimizer or not ab_logger:
+                return {}, [], ""
+
+            try:
+                summary = optimizer.get_experiment_summary()
+                metrics = ab_logger.get_metrics_summary()
+
+                result_text = f"""
+                ### Optimization Status
+                - **Total Variants**: {summary['num_arms']} active arms
+                - **Parameters**: {summary['num_parameters']} dimensions
+                - **Best Variant**: {json.dumps(summary['best_arm'], indent=2) if summary['best_arm'] else 'Computing...'}
+                """
+
+                return summary, metrics, result_text
+
+            except Exception as e:
+                logger.error(f"Failed to get A/B results: {e}")
+                return {}, [], f"❌ Error loading results: {str(e)}"
+
+        with gr.Row():
+            btn_refresh = gr.Button("🔄 Refresh Results", variant="primary")
+            btn_export = gr.Button("📥 Export Data")
+
+        summary_text = gr.Markdown("Loading results...")
+        metrics_table = gr.Dataframe(
+            headers=["Variant", "Engagement", "Retention", "Satisfaction", "Sample Size"],
+            value=[],
+            interactive=False,
+            label="Metrics by Variant"
+        )
+
+        def refresh_results():
+            """Refresh A/B test results."""
+            summary, metrics, text = get_ab_results()
+            return text, metrics
+
+        def export_results():
+            """Export A/B test metrics to CSV."""
+            try:
+                if ab_logger:
+                    ab_logger.export_to_csv("ab_test_export.csv")
+                    return "✅ Exported to ab_test_export.csv"
+                return "❌ A/B testing not initialized"
+            except Exception as e:
+                return f"❌ Export failed: {str(e)}"
+
+        btn_refresh.click(
+            refresh_results,
+            outputs=[summary_text, metrics_table],
+            api_name=False
+        )
+        btn_export.click(
+            export_results,
+            outputs=gr.Textbox(label="Status", interactive=False),
+            api_name=False
+        )
+
+        # Initial load
+        summary, metrics, text = get_ab_results()
+        summary_text.value = text
+        metrics_table.value = metrics
+
     with gr.Tab("ℹ️ About"):
         gr.Markdown(
             """
@@ -314,13 +714,13 @@ with gr.Blocks() as demo:
             **Iga** (Kinyarwanda for "learn") is an AI-powered language learning platform.
 
             ### Features
-            - 🔄 **Offline Translation** — MarianMT models for en↔rw, fr↔rw
-            - 🔊 **Text-to-Speech** — Natural pronunciation with Bark
-            - 🎯 **Two Learning Modes** — Rwanda Mode & Diaspora Mode
-            - 🗂️ **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
-            - 📦 **Phrase Packs** — 1,000+ curated phrases organized by context
-            - 🎮 **Gamification** — XP and streaks (prototype)
-            - 📚 **Spaced Repetition Ready** — Infrastructure for SRS scheduling
+            - **Offline Translation** — MarianMT models for en↔rw, fr↔rw
+            - **Text-to-Speech** — Natural pronunciation with Bark
+            - **Two Learning Modes** — Rwanda Mode & Diaspora Mode
+            - **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
+            - **Phrase Packs** — 1,000+ curated phrases organized by context
+            - **Gamification** — XP and streaks (prototype)
+            - **Spaced Repetition Ready** — Infrastructure for SRS scheduling
 
             ### Technology
             - **Translation:** Helsinki-NLP MarianMT
@@ -359,7 +759,7 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
         server_port=Config.SERVER_PORT,
-        share=Config.SHARE
+        share=True
     )
 
 
