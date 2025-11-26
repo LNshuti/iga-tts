@@ -14,12 +14,7 @@ from tts import synthesize
 from corpus import get_corpus
 from feedback_storage import get_feedback_storage
 from config import Config, logger, TranslationError, TTSError
-from audio_utils import (
-    numpy_to_wav_16k,
-    pcm_bytes_to_wav,
-    save_temp_wav,
-    validate_audio_for_download,
-)
+from audio_utils import numpy_to_wav_16k, save_temp_wav
 from bayesian_optimizer import AxOptimizer
 from ab_test_logging import ABTestLogger
 from variant_manager import VariantManager
@@ -396,15 +391,14 @@ with gr.Blocks() as demo:
             sources=["microphone"]
         )
 
-        feedback_status = gr.Textbox(
-            label="Status",
-            interactive=False,
-            lines=3
-        )
+        feedback_status = gr.Textbox(label="", interactive=False, lines=1)
 
-        # Store last recording info for download
-        last_feedback_id = gr.State(None)
-        last_audio_data = gr.State(None)
+        download_file = gr.File(
+            label="Download Recording",
+            file_types=[".wav"],
+            interactive=False,
+            visible=False
+        )
 
         def process_feedback(
             audio_data: Tuple[int, np.ndarray],
@@ -414,11 +408,11 @@ with gr.Blocks() as demo:
             dialect_val: str,
             phrase_val: str,
             notes_val: str
-        ) -> Tuple[str, Optional[int], Optional[Tuple[int, np.ndarray]]]:
-            """Process and store feedback, return ID and audio for download."""
+        ) -> Tuple[str, Any, Optional[str]]:
+            """Process feedback and create download file."""
             try:
                 if audio_data is None:
-                    return "⚠️ No audio recorded. Please record something.", None, None
+                    return "No audio recorded.", gr.update(visible=False), None
 
                 sample_rate, audio_array = audio_data
 
@@ -426,17 +420,14 @@ with gr.Blocks() as demo:
                 audio_int16 = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
                 audio_bytes = audio_int16.tobytes()
 
-                # Calculate duration and quality score
+                # Calculate duration and quality
                 duration = len(audio_array) / sample_rate
-
-                # Simple quality metric: check for clipping/distortion
                 max_val = np.max(np.abs(audio_array))
                 quality_score = min(1.0, max(0.0, 1.0 - (max(0, max_val - 0.95) * 2)))
 
-                # Map feedback type
                 feedback_type_mapped = "pronunciation" if "Pronunciation" in feedback_type_val else "general"
 
-                # Build notes with language/dialect info
+                # Build notes
                 full_notes = f"lang:{language_val}"
                 if dialect_val and dialect_val.strip():
                     full_notes += f"|dialect:{dialect_val.strip()}"
@@ -455,258 +446,26 @@ with gr.Blocks() as demo:
                     notes=full_notes
                 )
 
-                status_msg = (
-                    f"✅ **Feedback Recorded Successfully!**\n\n"
-                    f"**Recording ID:** {feedback_id}\n"
-                    f"**Duration:** {duration:.1f} seconds\n"
-                    f"**Quality Score:** {quality_score:.1%}\n"
-                    f"**Language:** {language_val}\n"
-                    f"**Type:** {feedback_type_mapped}\n\n"
-                    f"Use the Recording ID to download later, or click 'Download Recording' below."
-                )
+                # Create download file
+                wav_bytes = numpy_to_wav_16k(audio_array, sample_rate)
+                filepath = save_temp_wav(wav_bytes, feedback_id)
 
-                return status_msg, feedback_id, audio_data
+                status_msg = f"Saved ({duration:.1f}s, {quality_score:.0%} quality)"
+
+                return status_msg, gr.update(visible=True), filepath
 
             except Exception as e:
                 logger.error(f"Failed to process feedback: {e}")
-                return f"❌ Error: {str(e)}", None, None
+                return f"Error: {str(e)}", gr.update(visible=False), None
 
-        btn_submit_feedback = gr.Button("Submit Feedback", variant="primary")
+        btn_submit_feedback = gr.Button("Submit", variant="primary")
         btn_submit_feedback.click(
             process_feedback,
             inputs=[audio_input, feedback_type, feedback_domain, feedback_language,
                     feedback_dialect, feedback_phrase, feedback_notes],
-            outputs=[feedback_status, last_feedback_id, last_audio_data]
+            outputs=[feedback_status, download_file, download_file]
         )
-
-        # === DOWNLOAD SECTION ===
-        gr.Markdown("---")
-        gr.Markdown("### Download Your Recording")
-
-        with gr.Row():
-            btn_create_download = gr.Button("📥 Download Current Recording", variant="secondary")
-            download_file = gr.File(
-                label="Download Recording (16kHz WAV)",
-                file_types=[".wav"],
-                interactive=False
-            )
-
-        download_status = gr.Textbox(
-            label="Download Status",
-            interactive=False,
-            lines=1
-        )
-
-        def create_download(
-            audio_data: Optional[Tuple[int, np.ndarray]],
-            feedback_id: Optional[int]
-        ) -> Tuple[Optional[str], str]:
-            """Create downloadable WAV from current recording."""
-            try:
-                is_valid, error_msg = validate_audio_for_download(audio_data)
-                if not is_valid:
-                    return None, f"❌ {error_msg}"
-
-                sample_rate, audio_array = audio_data
-
-                # Convert to 16kHz mono WAV (corpus standard)
-                wav_bytes = numpy_to_wav_16k(audio_array, sample_rate)
-
-                # Save to temp file
-                filepath = save_temp_wav(wav_bytes, feedback_id)
-
-                msg = f"✅ WAV created (16 kHz mono). "
-                if error_msg:  # Warning message
-                    msg += error_msg
-
-                return filepath, msg
-
-            except Exception as e:
-                logger.error(f"Failed to create download: {e}")
-                return None, f"❌ Error creating download: {str(e)}"
-
-        btn_create_download.click(
-            create_download,
-            inputs=[last_audio_data, last_feedback_id],
-            outputs=[download_file, download_status]
-        )
-
-        # === RETRIEVE BY ID SECTION ===
-        gr.Markdown("### Retrieve Recording by ID")
-
-        with gr.Row():
-            retrieve_id_input = gr.Number(
-                label="Recording ID",
-                precision=0,
-                minimum=1,
-                info="Enter the Recording ID shown after submission"
-            )
-            btn_retrieve = gr.Button("🔍 Retrieve & Download", variant="secondary")
-
-        retrieve_file = gr.File(
-            label="Retrieved Recording",
-            file_types=[".wav"],
-            interactive=False
-        )
-        retrieve_status = gr.Textbox(
-            label="Retrieval Status",
-            interactive=False,
-            lines=1
-        )
-
-        def retrieve_by_id(feedback_id: Optional[float]) -> Tuple[Optional[str], str]:
-            """Retrieve and download recording by ID."""
-            try:
-                if not feedback_id or feedback_id < 1:
-                    return None, "⚠️ Please enter a valid Recording ID."
-
-                feedback_id_int = int(feedback_id)
-                feedback_storage = get_feedback_storage()
-                record = feedback_storage.get_feedback(feedback_id_int)
-
-                if not record:
-                    return None, f"❌ Recording ID {feedback_id_int} not found."
-
-                if not record.audio_data:
-                    return None, f"❌ Audio data unavailable for ID {feedback_id_int}."
-
-                # Convert PCM bytes to WAV
-                # Note: We stored at browser's sample rate, typically 48kHz
-                # Using 48kHz as default; ideally store original SR in DB
-                wav_bytes = pcm_bytes_to_wav(record.audio_data, sr=48000)
-
-                # Save to temp file
-                filepath = save_temp_wav(wav_bytes, feedback_id_int)
-
-                return filepath, (
-                    f"✅ Retrieved recording {feedback_id_int} | "
-                    f"Duration: {record.duration_seconds:.1f}s | "
-                    f"Domain: {record.domain or 'General'} | "
-                    f"Quality: {record.audio_quality_score:.0%}"
-                )
-
-            except Exception as e:
-                logger.error(f"Failed to retrieve recording: {e}")
-                return None, f"❌ Error: {str(e)}"
-
-        btn_retrieve.click(
-            retrieve_by_id,
-            inputs=[retrieve_id_input],
-            outputs=[retrieve_file, retrieve_status]
-        )
-
-    with gr.Tab("Learning Domains"):
-        gr.Markdown("""
-        ## Domain-Based Learning
-
-        Phrases are intelligently organized into domains for context-based learning.
-        Each domain focuses on a real-world topic with curated vocabulary and examples.
-        """)
-
-        # Get corpus stats
-        try:
-            corpus_obj = get_corpus()
-            stats = corpus_obj.get_stats()
-
-            # Display domain summary
-            domain_info = []
-            for domain in sorted(stats.get("categories", [])):
-                count = stats.get("by_domain", {}).get(domain, 0)
-                emoji = DOMAIN_EMOJIS.get(domain, "📝")
-                domain_info.append(f"{emoji} **{domain}** — {count} phrases")
-
-            gr.Markdown("### Available Domains\n\n" + "\n\n".join(domain_info))
-
-            # Overall statistics
-            gr.Markdown(f"""
-            ### Corpus Statistics
-
-            - **Total Phrases**: {stats['total_phrases']}
-            - **Domains**: {len(stats['categories'])}
-            - **Languages**: {', '.join(stats['languages'])}
-            - **Difficulty Distribution**:
-              - Beginner: {stats['by_difficulty'].get('beginner', 0)} phrases
-              - Intermediate: {stats['by_difficulty'].get('intermediate', 0)} phrases
-              - Advanced: {stats['by_difficulty'].get('advanced', 0)} phrases
-            """)
-        except Exception as e:
-            logger.error(f"Failed to load domain statistics: {e}")
-            gr.Markdown("⚠️ Could not load domain statistics")
-
-    with gr.Tab("📊 A/B Testing Results"):
-        gr.Markdown("""
-        ## Bayesian Curriculum Optimization
-
-        Real-time view of A/B test results. The system is continuously learning which
-        curriculum variations lead to better engagement, retention, and satisfaction.
-        """)
-
-        def get_ab_results():
-            """Fetch current A/B test results."""
-            if not optimizer or not ab_logger:
-                return {}, [], ""
-
-            try:
-                summary = optimizer.get_experiment_summary()
-                metrics = ab_logger.get_metrics_summary()
-
-                result_text = f"""
-                ### Optimization Status
-                - **Total Variants**: {summary['num_arms']} active arms
-                - **Parameters**: {summary['num_parameters']} dimensions
-                - **Best Variant**: {json.dumps(summary['best_arm'], indent=2) if summary['best_arm'] else 'Computing...'}
-                """
-
-                return summary, metrics, result_text
-
-            except Exception as e:
-                logger.error(f"Failed to get A/B results: {e}")
-                return {}, [], f"❌ Error loading results: {str(e)}"
-
-        with gr.Row():
-            btn_refresh = gr.Button("🔄 Refresh Results", variant="primary")
-            btn_export = gr.Button("📥 Export Data")
-
-        summary_text = gr.Markdown("Loading results...")
-        metrics_table = gr.Dataframe(
-            headers=["Variant", "Engagement", "Retention", "Satisfaction", "Sample Size"],
-            value=[],
-            interactive=False,
-            label="Metrics by Variant"
-        )
-
-        def refresh_results():
-            """Refresh A/B test results."""
-            summary, metrics, text = get_ab_results()
-            return text, metrics
-
-        def export_results():
-            """Export A/B test metrics to CSV."""
-            try:
-                if ab_logger:
-                    ab_logger.export_to_csv("ab_test_export.csv")
-                    return "✅ Exported to ab_test_export.csv"
-                return "❌ A/B testing not initialized"
-            except Exception as e:
-                return f"❌ Export failed: {str(e)}"
-
-        btn_refresh.click(
-            refresh_results,
-            outputs=[summary_text, metrics_table],
-            api_name=False
-        )
-        btn_export.click(
-            export_results,
-            outputs=gr.Textbox(label="Status", interactive=False),
-            api_name=False
-        )
-
-        # Initial load
-        summary, metrics, text = get_ab_results()
-        summary_text.value = text
-        metrics_table.value = metrics
-
-    with gr.Tab("ℹ️ About"):
+    with gr.Tab("About"):
         gr.Markdown(
             """
             ## About Iga TTS
