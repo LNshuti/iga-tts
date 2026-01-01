@@ -79,7 +79,9 @@ class CorpusLoader:
 
             # If corpus_file is a .txt file (for tests), load from text
             if self.corpus_file.endswith('.txt'):
+                logger.info(f"Loading corpus from text file: {corpus_path}")
                 if not corpus_path.exists():
+                    logger.warning(f"Text corpus file not found: {corpus_path}")
                     # Create default corpus for tests
                     self._create_default_corpus(corpus_path)
 
@@ -87,25 +89,33 @@ class CorpusLoader:
                 self._load_from_text_file(corpus_path)
             else:
                 # Load from DuckDB
-                self._db_corpus.load()
+                logger.info(f"Loading corpus from DuckDB: {self._db_corpus.db_file}")
+                try:
+                    self._db_corpus.load()
 
-                # Get all phrases from DuckDB
-                db_phrases = self._db_corpus.get_phrases()
+                    # Get all phrases from DuckDB
+                    db_phrases = self._db_corpus.get_phrases()
+                    logger.info(f"Retrieved {len(db_phrases)} phrases from DuckDB")
 
-                # Convert to Phrase objects for compatibility
-                for db_phrase in db_phrases:
-                    phrase = Phrase(
-                        text=db_phrase.text,
-                        language=db_phrase.language,
-                        category=db_phrase.domain,
-                        difficulty=db_phrase.difficulty,
-                        metadata={"id": db_phrase.id}
-                    )
-                    self.phrases.append(phrase)
+                    # Convert to Phrase objects for compatibility
+                    for db_phrase in db_phrases:
+                        phrase = Phrase(
+                            text=db_phrase.text,
+                            language=db_phrase.language,
+                            category=db_phrase.domain,
+                            difficulty=db_phrase.difficulty,
+                            metadata={"id": db_phrase.id}
+                        )
+                        self.phrases.append(phrase)
 
-                # Update categories and languages
-                self.categories = self._db_corpus.categories
-                self.languages = self._db_corpus.languages
+                    # Update categories and languages
+                    self.categories = self._db_corpus.categories
+                    self.languages = self._db_corpus.languages
+                except CorpusError as e:
+                    logger.error(f"DuckDB corpus not available: {e}")
+                    logger.warning("This is likely because corpus.duckdb file is missing")
+                    logger.warning("The app will fall back to hardcoded phrases from phrases.py")
+                    raise
 
             # Build index maps
             self._by_category = {}
@@ -256,12 +266,32 @@ class CorpusLoader:
         if not self._loaded:
             self.load()
 
+        # If loaded from text file, return local stats
+        if self.corpus_file.endswith('.txt'):
+            return {
+                "total_phrases": len(self.phrases),
+                "categories": sorted(list(self.categories)),
+                "languages": sorted(list(self.languages)),
+            }
+
         return self._db_corpus.get_stats()
 
     def get_by_domain(self, domain: str, language: Optional[str] = None) -> Dict[str, List[str]]:
         """Get phrases in a specific domain, organized by language."""
         if not self._loaded:
             self.load()
+
+        # If loaded from text file, use local data
+        if self.corpus_file.endswith('.txt'):
+            result = {}
+            for phrase in self.phrases:
+                if phrase.category == domain:
+                    if language and phrase.language != language.lower():
+                        continue
+                    if phrase.language not in result:
+                        result[phrase.language] = []
+                    result[phrase.language].append(phrase.text)
+            return result
 
         return self._db_corpus.get_by_domain(domain, language)
 

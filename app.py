@@ -2,6 +2,7 @@
 Iga TTS - Learn Kinyarwanda
 Enterprise-grade multilingual learning app with translation and text-to-speech.
 """
+import sys
 import gradio as gr
 from typing import Tuple, Optional, Any
 import traceback
@@ -9,25 +10,80 @@ import json
 import uuid
 import time
 
-from translation import translate
-from tts import synthesize
-from corpus import get_corpus
-from feedback_storage import get_feedback_storage
+# Early logging setup
 from config import Config, logger, TranslationError, TTSError
-from audio_utils import numpy_to_wav_16k, save_temp_wav
-from bayesian_optimizer import AxOptimizer
-from ab_test_logging import ABTestLogger
-from variant_manager import VariantManager
+
+logger.info("=" * 80)
+logger.info("STARTING IGA TTS APPLICATION")
+logger.info("=" * 80)
+
+# Validate configuration on startup
+try:
+    if not Config.validate():
+        raise RuntimeError("Configuration validation failed")
+    logger.info("✓ Configuration validated successfully")
+except Exception as e:
+    logger.error(f"✗ Configuration validation failed: {e}", exc_info=True)
+    raise
+
+# Import core modules with error tracking
+try:
+    logger.info("Importing translation module...")
+    from translation import translate
+    logger.info("✓ Translation module loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import translation module: {e}", exc_info=True)
+    raise
+
+try:
+    logger.info("Importing TTS module...")
+    from tts import synthesize
+    logger.info("✓ TTS module loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import TTS module: {e}", exc_info=True)
+    raise
+
+try:
+    logger.info("Importing corpus module...")
+    from corpus import get_corpus
+    logger.info("✓ Corpus module loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import corpus module: {e}", exc_info=True)
+    raise
+
+try:
+    logger.info("Importing feedback storage module...")
+    from feedback_storage import get_feedback_storage
+    logger.info("✓ Feedback storage module loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import feedback storage module: {e}", exc_info=True)
+    raise
+
+try:
+    logger.info("Importing audio utilities...")
+    from audio_utils import numpy_to_wav_16k, save_temp_wav
+    logger.info("✓ Audio utilities loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import audio utilities: {e}", exc_info=True)
+    raise
+
+try:
+    logger.info("Importing A/B testing modules...")
+    from bayesian_optimizer import AxOptimizer
+    from ab_test_logging import ABTestLogger
+    from variant_manager import VariantManager
+    logger.info("✓ A/B testing modules loaded")
+except Exception as e:
+    logger.error(f"✗ Failed to import A/B testing modules: {e}", exc_info=True)
+    raise
+
 import numpy as np
 from datetime import datetime
 
-# Validate configuration on startup
-if not Config.validate():
-    raise RuntimeError("Configuration validation failed")
-
-logger.info("Starting Iga TTS application")
 logger.info(f"TTS Model: {Config.TTS_MODEL}")
 logger.info(f"Device: {Config.DEVICE or 'CPU'}")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Gradio version: {gr.__version__}")
 
 LANGS = ["en", "fr", "rw"]
 LANG_LABELS = {"en": "English", "fr": "Français", "rw": "Kinyarwanda"}
@@ -113,29 +169,51 @@ def on_mode_change(mode_label: str) -> Tuple[str, str]:
 
 
 # Load corpus on startup
+logger.info("=" * 80)
+logger.info("LOADING CORPUS")
+logger.info("=" * 80)
 try:
+    logger.info("Attempting to load corpus from DuckDB...")
     corpus = get_corpus()
     PHRASE_PACKS = corpus.get_by_category_dict()
-    logger.info(f"Loaded corpus with {len(corpus.phrases)} phrases")
-    logger.info(f"Categories: {corpus.categories}")
+    logger.info(f"✓ Loaded corpus with {len(corpus.phrases)} phrases")
+    logger.info(f"✓ Categories: {corpus.categories}")
+    logger.info(f"✓ Languages: {corpus.languages}")
 except Exception as e:
-    logger.error(f"Failed to load corpus: {e}", exc_info=True)
+    logger.error(f"✗ Failed to load corpus from DuckDB: {e}", exc_info=True)
+    logger.warning("Attempting to load fallback hardcoded phrases...")
     # Fallback to hardcoded phrases
-    from phrases import PHRASE_PACKS
-    logger.warning("Using fallback hardcoded phrases")
+    try:
+        from phrases import PHRASE_PACKS
+        logger.info("✓ Loaded fallback hardcoded phrases")
+    except Exception as fallback_error:
+        logger.error(f"✗ Failed to load fallback phrases: {fallback_error}", exc_info=True)
+        raise RuntimeError("Could not load corpus or fallback phrases")
 
 # Initialize A/B testing components
+logger.info("=" * 80)
+logger.info("INITIALIZING A/B TESTING FRAMEWORK")
+logger.info("=" * 80)
 try:
+    logger.info("Creating ABTestLogger...")
     ab_logger = ABTestLogger(db_path="ab_test.db")
+    logger.info("✓ ABTestLogger created")
+
+    logger.info("Creating AxOptimizer...")
     optimizer = AxOptimizer(db_logger=ab_logger)
+    logger.info("✓ AxOptimizer created")
+
+    logger.info("Creating VariantManager...")
     variant_manager = VariantManager(ab_logger)
-    logger.info("Initialized Bayesian A/B testing framework")
+    logger.info("✓ VariantManager created")
+
+    logger.info("✓ Bayesian A/B testing framework initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize A/B testing: {e}", exc_info=True)
+    logger.error(f"✗ Failed to initialize A/B testing: {e}", exc_info=True)
     ab_logger = None
     optimizer = None
     variant_manager = None
-    logger.warning("A/B testing disabled due to initialization failure")
+    logger.warning("⚠ A/B testing disabled due to initialization failure")
 
 
 with gr.Blocks() as demo:
@@ -352,9 +430,10 @@ with gr.Blocks() as demo:
             )
 
         with gr.Row():
+            domain_choices = sorted(corpus.categories) if corpus.categories else ["General"]
             feedback_domain = gr.Dropdown(
-                choices=sorted(corpus.categories) if corpus.categories else ["General"],
-                value="General",
+                choices=domain_choices,
+                value=domain_choices[0] if domain_choices else None,
                 label="Learning Domain (Optional)"
             )
 
@@ -511,15 +590,31 @@ with gr.Blocks() as demo:
         except:
             pass
 
+    logger.info("Setting up Gradio queue...")
     demo.queue(max_size=Config.QUEUE_MAX_SIZE)
+    logger.info(f"✓ Queue configured (max_size={Config.QUEUE_MAX_SIZE})")
+
+logger.info("=" * 80)
+logger.info("APPLICATION INITIALIZATION COMPLETE")
+logger.info("=" * 80)
 
 if __name__ == "__main__":
-    logger.info("Launching Gradio interface...")
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=Config.SERVER_PORT,
-        share=True
-    )
+    logger.info("=" * 80)
+    logger.info("LAUNCHING GRADIO INTERFACE")
+    logger.info("=" * 80)
+    logger.info(f"Server: 0.0.0.0:{Config.SERVER_PORT}")
+    logger.info(f"Share: True")
+
+    try:
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=Config.SERVER_PORT,
+            share=True
+        )
+        logger.info("✓ Gradio interface launched successfully")
+    except Exception as e:
+        logger.error(f"✗ Failed to launch Gradio interface: {e}", exc_info=True)
+        raise
 
 
 

@@ -1,10 +1,13 @@
 transformers>=4.43.0
 accelerate>=0.33.0
 torch
-gradio==4.43.0
+gradio>=4.44.1
 sentencepiece
 sacremoses
 numpy
 soundfile
 pytest>=7.0.0
 evaluate>=0.4.0
+duckdb>=0.9.0
+scipy>=1.11.0
+cryptography>=41.0.0

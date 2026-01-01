@@ -41,9 +41,16 @@ class DuckDBCorpus:
         if self._loaded:
             return
 
-        if not Path(self.db_file).exists():
-            logger.error(f"DuckDB file not found: {self.db_file}")
-            raise CorpusError(f"Corpus database not found at {self.db_file}")
+        db_path = Path(self.db_file)
+        if not db_path.exists():
+            logger.error(f"DuckDB corpus file not found: {self.db_file}")
+            logger.error(f"Expected location: {db_path.absolute()}")
+            logger.error("This file should be created by running preprocess_corpus.py")
+            logger.error("The application will attempt to fall back to hardcoded phrases")
+            raise CorpusError(
+                f"Corpus database not found at {self.db_file}. "
+                f"Please run preprocess_corpus.py to generate it, or ensure corpus.duckdb exists."
+            )
 
         try:
             self.db = duckdb.connect(str(self.db_file), read_only=True)
