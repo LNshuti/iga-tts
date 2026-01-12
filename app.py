@@ -1,620 +1,423 @@
+#!/usr/bin/env python3
 """
-Iga TTS - Learn Kinyarwanda
-Enterprise-grade multilingual learning app with translation and text-to-speech.
+English <-> Swahili Bidirectional Speech & Text Translator
+Deployed on Hugging Face Spaces with Gradio UI
 """
-import sys
-import gradio as gr
-from typing import Tuple, Optional, Any
-import traceback
-import json
-import uuid
-import time
 
-# Early logging setup
-from config import Config, logger, TranslationError, TTSError
-
-logger.info("=" * 80)
-logger.info("STARTING IGA TTS APPLICATION")
-logger.info("=" * 80)
-
-# Validate configuration on startup
-try:
-    if not Config.validate():
-        raise RuntimeError("Configuration validation failed")
-    logger.info("✓ Configuration validated successfully")
-except Exception as e:
-    logger.error(f"✗ Configuration validation failed: {e}", exc_info=True)
-    raise
-
-# Import core modules with error tracking
-try:
-    logger.info("Importing translation module...")
-    from translation import translate
-    logger.info("✓ Translation module loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import translation module: {e}", exc_info=True)
-    raise
-
-try:
-    logger.info("Importing TTS module...")
-    from tts import synthesize
-    logger.info("✓ TTS module loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import TTS module: {e}", exc_info=True)
-    raise
-
-try:
-    logger.info("Importing corpus module...")
-    from corpus import get_corpus
-    logger.info("✓ Corpus module loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import corpus module: {e}", exc_info=True)
-    raise
-
-try:
-    logger.info("Importing feedback storage module...")
-    from feedback_storage import get_feedback_storage
-    logger.info("✓ Feedback storage module loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import feedback storage module: {e}", exc_info=True)
-    raise
-
-try:
-    logger.info("Importing audio utilities...")
-    from audio_utils import numpy_to_wav_16k, save_temp_wav
-    logger.info("✓ Audio utilities loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import audio utilities: {e}", exc_info=True)
-    raise
-
-try:
-    logger.info("Importing A/B testing modules...")
-    from bayesian_optimizer import AxOptimizer
-    from ab_test_logging import ABTestLogger
-    from variant_manager import VariantManager
-    logger.info("✓ A/B testing modules loaded")
-except Exception as e:
-    logger.error(f"✗ Failed to import A/B testing modules: {e}", exc_info=True)
-    raise
-
+import os
+import tempfile
 import numpy as np
-from datetime import datetime
+import gradio as gr
+import torch
+from config import Config, logger
 
-logger.info(f"TTS Model: {Config.TTS_MODEL}")
-logger.info(f"Device: {Config.DEVICE or 'CPU'}")
-logger.info(f"Python version: {sys.version}")
-logger.info(f"Gradio version: {gr.__version__}")
+# Resolve device
+DEVICE = Config.get_device()
+WHISPER_MODEL_SIZE = Config.WHISPER_MODEL_SIZE
 
-LANGS = ["en", "fr", "rw"]
-LANG_LABELS = {"en": "English", "fr": "Français", "rw": "Kinyarwanda"}
+logger.info(f"Device: {DEVICE}, Whisper: {WHISPER_MODEL_SIZE}")
 
-MODES = {
-    "Rwanda Mode (Kinyarwanda → EN/FR)": ("rw", "en"),
-    "Diaspora Mode (EN/FR → Kinyarwanda)": ("en", "rw"),
+# Language mapping
+LANG_CODES = {
+    "en": "English",
+    "sw": "Kiswahili"
 }
 
-# Domain metadata with emojis
-DOMAIN_EMOJIS = {
-    "Greetings": "👋",
-    "Food": "🍔",
-    "Work": "💼",
-    "Education": "🎓",
-    "Emotions": "❤️",
-    "Numbers": "🔢",
-    "Time": "⏰",
-    "Family": "👨‍👩‍👧‍👦",
-}
+# Global model references
+whisper_model = None
+translator_en_sw = None
+translator_sw_en = None
+tts_model = None
 
 
-def do_translate(text: str, src: str, tgt: str) -> str:
-    """
-    Translate text with error handling.
+def load_models():
+    """Load all models on startup with error handling."""
+    global whisper_model, translator_en_sw, translator_sw_en, tts_model
 
-    Returns error message on failure instead of crashing.
-    """
+    # 1. Load faster-whisper for STT
     try:
-        if not text or not text.strip():
-            return ""
+        logger.info(f"Loading faster-whisper model: {WHISPER_MODEL_SIZE}")
+        from faster_whisper import WhisperModel
+        whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE,
+            device=DEVICE,
+            compute_type="float16" if DEVICE == "cuda" else "int8"
+        )
+        logger.info("Whisper model loaded")
+    except Exception as e:
+        logger.error(f"Failed to load Whisper: {e}")
+        whisper_model = None
 
-        result = translate(text, src, tgt)
-        logger.info(f"Translation successful: {text[:30]}... -> {result[:30]}...")
-        return result
+    # 2. Load MarianMT translation models
+    try:
+        logger.info("Loading translation models (MarianMT)...")
+        from transformers import MarianMTModel, MarianTokenizer
 
-    except TranslationError as e:
-        error_msg = f"Translation error: {str(e)}"
-        logger.error(error_msg)
-        return f"❌ {error_msg}"
+        translator_en_sw = {
+            "tokenizer": MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-sw"),
+            "model": MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-sw").to(DEVICE)
+        }
+
+        translator_sw_en = {
+            "tokenizer": MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-sw-en"),
+            "model": MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-sw-en").to(DEVICE)
+        }
+        logger.info("Translation models loaded")
+    except Exception as e:
+        logger.error(f"Failed to load translation models: {e}")
+        translator_en_sw = None
+        translator_sw_en = None
+
+    # 3. Load Coqui TTS (XTTS-v2)
+    try:
+        logger.info("Loading TTS model (XTTS-v2)...")
+        from TTS.api import TTS
+        tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(DEVICE)
+        logger.info("TTS model loaded")
+    except Exception as e:
+        logger.error(f"Failed to load TTS: {e}")
+        tts_model = None
+
+
+def stt(audio_path, lang_hint="auto"):
+    """
+    Speech-to-text using faster-whisper.
+
+    Args:
+        audio_path: Path to audio file or tuple (sample_rate, numpy_array)
+        lang_hint: "auto", "en", or "sw"
+
+    Returns:
+        (detected_lang, transcript_text)
+    """
+    if whisper_model is None:
+        return "error", "STT model not loaded. Please check logs."
+
+    try:
+        import soundfile as sf
+
+        # Handle Gradio audio input (tuple of sample_rate, data)
+        if isinstance(audio_path, tuple):
+            sr, audio_data = audio_path
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                sf.write(tmp.name, audio_data, sr)
+                audio_path = tmp.name
+
+        # Transcribe
+        language = None if lang_hint == "auto" else lang_hint
+        segments, info = whisper_model.transcribe(
+            audio_path,
+            language=language,
+            beam_size=1,
+            vad_filter=True
+        )
+
+        transcript = " ".join([seg.text for seg in segments]).strip()
+        detected_lang = info.language if lang_hint == "auto" else lang_hint
+
+        # Clean up temp file
+        if isinstance(audio_path, str) and audio_path.startswith("/tmp"):
+            try:
+                os.remove(audio_path)
+            except:
+                pass
+
+        logger.info(f"STT: {detected_lang} -> '{transcript[:50]}...'")
+        return detected_lang, transcript
 
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        logger.error(f"Translation failed: {e}", exc_info=True)
-        return f"❌ {error_msg}"
+        logger.error(f"STT error: {e}")
+        return "error", f"Transcription failed: {str(e)}"
 
 
-def do_tts(text: str) -> Optional[Tuple[int, Any]]:
+def translate_text(text, src_lang, tgt_lang):
     """
-    Generate speech with error handling.
+    Translate text using MarianMT.
 
-    Returns None on failure with error logging.
+    Args:
+        text: Source text
+        src_lang: "en" or "sw"
+        tgt_lang: "en" or "sw"
+
+    Returns:
+        Translated text string
     """
+    if not text or not text.strip():
+        return ""
+
+    if src_lang == tgt_lang:
+        return text
+
+    # Select correct model
+    if src_lang == "en" and tgt_lang == "sw":
+        translator = translator_en_sw
+    elif src_lang == "sw" and tgt_lang == "en":
+        translator = translator_sw_en
+    else:
+        return f"Unsupported language pair: {src_lang} -> {tgt_lang}"
+
+    if translator is None:
+        return "Translation model not loaded."
+
     try:
-        if not text or not text.strip():
-            return None
+        tokenizer = translator["tokenizer"]
+        model = translator["model"]
 
-        # Don't synthesize error messages
-        if text.startswith("❌"):
-            logger.warning("Skipping TTS for error message")
-            return None
+        inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
 
-        sr, audio = synthesize(text)
-        logger.info(f"TTS synthesis successful for: {text[:30]}...")
-        return (sr, audio)
+        with torch.no_grad():
+            translated = model.generate(**inputs, max_length=512)
 
-    except TTSError as e:
+        translation = tokenizer.decode(translated[0], skip_special_tokens=True)
+
+        logger.info(f"Translation ({src_lang}->{tgt_lang}): '{text[:30]}...' -> '{translation[:30]}...'")
+        return translation
+
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return f"Translation failed: {str(e)}"
+
+
+def tts_synthesize(text, lang):
+    """
+    Synthesize speech using XTTS-v2.
+
+    Args:
+        text: Text to synthesize
+        lang: "en" or "sw"
+
+    Returns:
+        (sample_rate, audio_numpy_array) or None on error
+    """
+    if tts_model is None:
+        logger.warning("TTS model not available")
+        return None
+
+    if not text or not text.strip():
+        return None
+
+    try:
+        import soundfile as sf
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tts_model.tts_to_file(
+                text=text,
+                language=lang,
+                file_path=tmp.name,
+                speaker_wav=None,
+                speed=1.0
+            )
+
+            audio_data, sr = sf.read(tmp.name)
+
+            try:
+                os.remove(tmp.name)
+            except:
+                pass
+
+            logger.info(f"TTS synthesized: {lang}, {len(audio_data)} samples")
+            return (sr, audio_data.astype(np.float32))
+
+    except Exception as e:
         logger.error(f"TTS error: {e}")
-        gr.Warning(f"Speech synthesis failed: {str(e)}")
-        return None
-
-    except Exception as e:
-        logger.error(f"TTS failed: {e}", exc_info=True)
-        gr.Warning(f"Unexpected error during speech synthesis: {str(e)}")
         return None
 
 
-def on_mode_change(mode_label: str) -> Tuple[str, str]:
-    """Update source and target languages based on mode."""
-    if "Rwanda Mode" in mode_label:
-        return "rw", "en"
-    return "en", "rw"
+def pipe_audio_to_audio(audio, src_lang, tgt_lang):
+    """
+    Full pipeline: Audio -> STT -> Translation -> TTS
+
+    Returns:
+        (detected_lang_str, transcript, translation, audio_output)
+    """
+    if audio is None:
+        return "—", "No audio input", "", None
+
+    # Step 1: STT
+    detected_lang, transcript = stt(audio, src_lang)
+
+    if detected_lang == "error":
+        return "Error", transcript, "", None
+
+    # Use detected language as source
+    actual_src = detected_lang if detected_lang in ["en", "sw"] else "en"
+
+    # Step 2: Translation
+    translation = translate_text(transcript, actual_src, tgt_lang)
+
+    # Step 3: TTS
+    audio_output = tts_synthesize(translation, tgt_lang)
+
+    detected_lang_str = LANG_CODES.get(actual_src, actual_src)
+
+    return detected_lang_str, transcript, translation, audio_output
 
 
-# Load corpus on startup
-logger.info("=" * 80)
-logger.info("LOADING CORPUS")
-logger.info("=" * 80)
-try:
-    logger.info("Attempting to load corpus from DuckDB...")
-    corpus = get_corpus()
-    PHRASE_PACKS = corpus.get_by_category_dict()
-    logger.info(f"✓ Loaded corpus with {len(corpus.phrases)} phrases")
-    logger.info(f"✓ Categories: {corpus.categories}")
-    logger.info(f"✓ Languages: {corpus.languages}")
-except Exception as e:
-    logger.error(f"✗ Failed to load corpus from DuckDB: {e}", exc_info=True)
-    logger.warning("Attempting to load fallback hardcoded phrases...")
-    # Fallback to hardcoded phrases
-    try:
-        from phrases import PHRASE_PACKS
-        logger.info("✓ Loaded fallback hardcoded phrases")
-    except Exception as fallback_error:
-        logger.error(f"✗ Failed to load fallback phrases: {fallback_error}", exc_info=True)
-        raise RuntimeError("Could not load corpus or fallback phrases")
+def pipe_text_to_audio(text, src_lang, tgt_lang):
+    """
+    Pipeline: Text -> Translation -> TTS
 
-# Initialize A/B testing components
-logger.info("=" * 80)
-logger.info("INITIALIZING A/B TESTING FRAMEWORK")
-logger.info("=" * 80)
-try:
-    logger.info("Creating ABTestLogger...")
-    ab_logger = ABTestLogger(db_path="ab_test.db")
-    logger.info("✓ ABTestLogger created")
+    Returns:
+        (translation, audio_output)
+    """
+    if not text or not text.strip():
+        return "No text input", None
 
-    logger.info("Creating AxOptimizer...")
-    optimizer = AxOptimizer(db_logger=ab_logger)
-    logger.info("✓ AxOptimizer created")
+    # Step 1: Translation
+    translation = translate_text(text, src_lang, tgt_lang)
 
-    logger.info("Creating VariantManager...")
-    variant_manager = VariantManager(ab_logger)
-    logger.info("✓ VariantManager created")
+    # Step 2: TTS
+    audio_output = tts_synthesize(translation, tgt_lang)
 
-    logger.info("✓ Bayesian A/B testing framework initialized successfully")
-except Exception as e:
-    logger.error(f"✗ Failed to initialize A/B testing: {e}", exc_info=True)
-    ab_logger = None
-    optimizer = None
-    variant_manager = None
-    logger.warning("⚠ A/B testing disabled due to initialization failure")
+    return translation, audio_output
 
 
-with gr.Blocks() as demo:
-    # Session management for A/B testing
-    session_id = gr.State(str(uuid.uuid4()))  # Anonymous session ID
-    session_start = gr.State(time.time())
-    session_phrases_count = gr.State(0)
-    session_xp_earned = gr.State(0)
-    current_variant = gr.State({})
+def build_ui():
+    """Build the Gradio interface."""
 
-    gr.Markdown(
-        """
-        # Learn Kinyarwanda — Iga TTS
-
-        **Gamified language learning with AI-powered translation and text-to-speech.**
-
-        Switch modes, translate phrases, and listen to natural pronunciation.
-        """
-    )
-
-    with gr.Tab("Learn"):
-        mode = gr.Dropdown(
-            choices=list(MODES.keys()),
-            value=list(MODES.keys())[0],
-            label="Learning Mode",
-            info="Choose your learning context"
-        )
-
-        with gr.Row():
-            src = gr.Dropdown(
-                choices=LANGS,
-                value="rw",
-                label="Source Language",
-                info="Auto-updated by mode"
-            )
-            tgt = gr.Dropdown(
-                choices=LANGS,
-                value="en",
-                label="Target Language",
-                info="Auto-updated by mode"
-            )
-
-        mode.change(on_mode_change, inputs=mode, outputs=[src, tgt], api_name=False)
-
-        with gr.Row():
-            inp = gr.Textbox(
-                label="Input Text",
-                placeholder="Type a phrase to translate…",
-                lines=2
-            )
-            out = gr.Textbox(
-                label="Translated Text",
-                lines=2
-            )
-
-        with gr.Row():
-            btn_translate = gr.Button("Translate", variant="primary")
-            btn_tts = gr.Button("Speak Translation")
-
-        audio = gr.Audio(label="Synthesized Speech", type="numpy")
-
-        # Simple XP/Streak mock (non-persistent)
-        xp = gr.State(0)
-        streak = gr.State(1)
-        xp_display = gr.Markdown("**XP:** 0 | **Streak:** 1 day")
-
-        def on_translate(text: str, src_lang: str, tgt_lang: str, xp_val: int, streak_val: int):
-            """Handle translation with XP tracking."""
-            tr = do_translate(text, src_lang, tgt_lang)
-            # Award XP only for successful translations (not error messages)
-            if tr and not tr.startswith("❌"):
-                xp_val += 5
-            return tr, f"**XP:** {xp_val} | **Streak:** {streak_val} day{'s' if streak_val > 1 else ''}", xp_val, streak_val
-
-        btn_translate.click(
-            on_translate,
-            inputs=[inp, src, tgt, xp, streak],
-            outputs=[out, xp_display, xp, streak]
-        )
-        btn_tts.click(do_tts, inputs=[out], outputs=[audio])
-
-    with gr.Tab("📦 Phrase Packs"):
+    with gr.Blocks(title="English <-> Swahili Translator", theme=gr.themes.Soft()) as app:
         gr.Markdown("""
-        **Organized by Domain** — Browse curated phrases grouped by real-world contexts.
+        # English <-> Swahili Speech & Text Translator
+
+        Speak or type in English or Swahili, get translations and natural speech output.
+
+        **Privacy Notice**: All processing happens locally on this server. No data is sent to third parties.
         """)
 
-        with gr.Row():
-            # Domain selection with emoji labels
-            domain_choices = [f"{DOMAIN_EMOJIS.get(d, '📝')} {d}" for d in sorted(PHRASE_PACKS.keys())]
-            domain_choice_map = {label: domain for label, domain in zip(domain_choices, sorted(PHRASE_PACKS.keys()))}
+        with gr.Tabs():
+            # Tab A: Audio -> Audio
+            with gr.Tab("Speak -> Translate -> Speak"):
+                gr.Markdown("### Record or upload audio, get transcript, translation, and synthesized speech")
 
-            pack = gr.Dropdown(
-                choices=domain_choices,
-                value=domain_choices[0] if domain_choices else None,
-                label="📚 Learning Domain",
-                info="Choose a domain to explore phrases"
-            )
+                with gr.Row():
+                    with gr.Column():
+                        audio_input = gr.Audio(
+                            sources=["microphone", "upload"],
+                            type="numpy",
+                            label="Input Audio"
+                        )
 
-        with gr.Row():
-            lang_for_pack = gr.Dropdown(
-                choices=LANGS,
-                value="en",
-                label="Phrase Language"
-            )
-            tgt_pack = gr.Dropdown(
-                choices=LANGS,
-                value="rw",
-                label="Translate To"
-            )
+                        with gr.Row():
+                            src_lang_audio = gr.Dropdown(
+                                choices=["auto", "en", "sw"],
+                                value="auto",
+                                label="Source Language"
+                            )
+                            tgt_lang_audio = gr.Dropdown(
+                                choices=["en", "sw"],
+                                value="sw",
+                                label="Target Language"
+                            )
 
-        phrase = gr.Dropdown(
-            choices=[],
-            label="Select a Phrase from This Domain",
-            interactive=True
-        )
+                        audio_button = gr.Button("Transcribe + Translate + Speak", variant="primary")
 
-        translated = gr.Textbox(label="Translation", lines=2, interactive=False)
+                    with gr.Column():
+                        detected_lang_out = gr.Textbox(label="Detected Language", interactive=False)
+                        transcript_out = gr.Textbox(label="Transcript (Source)", lines=3, interactive=False)
+                        translation_out = gr.Textbox(label="Translation (Target)", lines=3, interactive=False)
+                        audio_output = gr.Audio(label="Synthesized Speech", type="numpy")
 
-        with gr.Row():
-            btn_translate2 = gr.Button("Translate", variant="primary")
-            btn_tts2 = gr.Button("Speak Translation")
-
-        audio2 = gr.Audio(label="Synthesized Speech", type="numpy")
-
-        def update_phrases_with_emoji(pack_with_emoji: str, lang: str):
-            """Update available phrases based on domain and language."""
-            try:
-                # Extract domain from emoji label
-                domain = domain_choice_map.get(pack_with_emoji, "General")
-
-                if domain in PHRASE_PACKS and lang in PHRASE_PACKS[domain]:
-                    choices = PHRASE_PACKS[domain][lang]
-                    if choices:
-                        return gr.update(choices=choices, value=choices[0])
-                return gr.update(choices=[], value=None)
-            except Exception as e:
-                logger.error(f"Failed to update phrases: {e}")
-                return gr.update(choices=[], value=None)
-
-        pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
-        lang_for_pack.change(update_phrases_with_emoji, inputs=[pack, lang_for_pack], outputs=[phrase], api_name=False)
-
-        def translate_pack_phrase(
-            lang: str, phr: str, tgt_lang: str, sess_id: str, variant: dict,
-            phrase_count: int, xp: int
-        ) -> Tuple[str, int, dict]:
-            """Translate selected phrase and log metrics for A/B testing."""
-            if not phr:
-                return "", phrase_count, variant
-
-            phrase_start = time.time()
-            translation = do_translate(phr, lang, tgt_lang)
-            duration_ms = int((time.time() - phrase_start) * 1000)
-
-            # Determine if translation was successful
-            success = translation and not translation.startswith("❌")
-
-            # Award XP for successful translation
-            new_xp = xp + (5 if success else 0)
-
-            # Ensure user has variant assignment
-            if not variant and ab_logger and optimizer and variant_manager:
-                try:
-                    variant = variant_manager.get_or_assign_user_variant(sess_id, optimizer)
-                except Exception as e:
-                    logger.warning(f"Failed to assign variant: {e}")
-                    variant = {}
-
-            # Log phrase attempt to A/B testing
-            if ab_logger and variant:
-                try:
-                    ab_logger.log_phrase_attempt(
-                        user_id=sess_id,
-                        variant_id=json.dumps(variant),
-                        phrase=phr,
-                        duration_ms=duration_ms,
-                        success=success,
-                    )
-
-                    # Every 10 phrases, update posterior and increment session
-                    new_count = phrase_count + 1
-                    if new_count % 10 == 0 and optimizer:
-                        metrics = ab_logger.get_metrics_for_optimization()
-                        optimizer.update_posterior(metrics)
-
-                except Exception as e:
-                    logger.warning(f"Failed to log phrase attempt: {e}")
-
-            return translation, phrase_count + 1, variant
-
-        btn_translate2.click(
-            translate_pack_phrase,
-            inputs=[lang_for_pack, phrase, tgt_pack, session_id, current_variant,
-                   session_phrases_count, session_xp_earned],
-            outputs=[translated, session_phrases_count, current_variant]
-        )
-        btn_tts2.click(do_tts, inputs=[translated], outputs=[audio2])
-
-    with gr.Tab("🎤 Feedback"):
-        gr.Markdown("""
-        ## Share Your Feedback
-
-        Record your pronunciation practice or general feedback about the app.
-        Your recordings are encrypted and securely stored for learning analytics.
-
-        **Privacy Notice:** Audio is encrypted with AES-256 before storage.
-        """)
-
-        with gr.Row():
-            feedback_type = gr.Radio(
-                choices=["Pronunciation Practice", "General Feedback"],
-                value="Pronunciation Practice",
-                label="Feedback Type"
-            )
-
-        with gr.Row():
-            domain_choices = sorted(corpus.categories) if corpus.categories else ["General"]
-            feedback_domain = gr.Dropdown(
-                choices=domain_choices,
-                value=domain_choices[0] if domain_choices else None,
-                label="Learning Domain (Optional)"
-            )
-
-        # Language selection for corpus tagging
-        with gr.Row():
-            feedback_language = gr.Dropdown(
-                choices=["rw", "rn", "en", "fr"],
-                value="rw",
-                label="Language Being Spoken",
-                info="rw=Kinyarwanda, rn=Kirundi, en=English, fr=French"
-            )
-            feedback_dialect = gr.Textbox(
-                label="Dialect/Variety (Optional)",
-                placeholder="e.g., Kigali, Northern, Southern...",
-                max_lines=1
-            )
-
-        feedback_phrase = gr.Textbox(
-            label="Phrase Being Practiced (Optional)",
-            placeholder="Enter the phrase you're practicing...",
-            lines=2
-        )
-
-        feedback_notes = gr.Textbox(
-            label="Additional Notes (Optional)",
-            placeholder="Any comments or context for this recording?",
-            lines=2
-        )
-
-        gr.Markdown("### Record Audio")
-        audio_input = gr.Audio(
-            label="🎙️ Click to Record",
-            type="numpy",
-            sources=["microphone"]
-        )
-
-        feedback_status = gr.Textbox(label="", interactive=False, lines=1)
-
-        download_file = gr.File(
-            label="Download Recording",
-            file_types=[".wav"],
-            interactive=False,
-            visible=False
-        )
-
-        def process_feedback(
-            audio_data: Tuple[int, np.ndarray],
-            feedback_type_val: str,
-            domain_val: str,
-            language_val: str,
-            dialect_val: str,
-            phrase_val: str,
-            notes_val: str
-        ) -> Tuple[str, Any, Optional[str]]:
-            """Process feedback and create download file."""
-            try:
-                if audio_data is None:
-                    return "No audio recorded.", gr.update(visible=False), None
-
-                sample_rate, audio_array = audio_data
-
-                # Convert to bytes (16-bit PCM)
-                audio_int16 = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
-                audio_bytes = audio_int16.tobytes()
-
-                # Calculate duration and quality
-                duration = len(audio_array) / sample_rate
-                max_val = np.max(np.abs(audio_array))
-                quality_score = min(1.0, max(0.0, 1.0 - (max(0, max_val - 0.95) * 2)))
-
-                feedback_type_mapped = "pronunciation" if "Pronunciation" in feedback_type_val else "general"
-
-                # Build notes
-                full_notes = f"lang:{language_val}"
-                if dialect_val and dialect_val.strip():
-                    full_notes += f"|dialect:{dialect_val.strip()}"
-                if notes_val and notes_val.strip():
-                    full_notes += f"|{notes_val.strip()}"
-
-                # Submit to storage
-                feedback_storage = get_feedback_storage()
-                feedback_id = feedback_storage.submit_feedback(
-                    audio_bytes=audio_bytes,
-                    feedback_type=feedback_type_mapped,
-                    domain=domain_val if domain_val != "General" else None,
-                    phrase_text=phrase_val if phrase_val.strip() else None,
-                    duration_seconds=duration,
-                    audio_quality_score=quality_score,
-                    notes=full_notes
+                audio_button.click(
+                    fn=pipe_audio_to_audio,
+                    inputs=[audio_input, src_lang_audio, tgt_lang_audio],
+                    outputs=[detected_lang_out, transcript_out, translation_out, audio_output]
                 )
 
-                # Create download file
-                wav_bytes = numpy_to_wav_16k(audio_array, sample_rate)
-                filepath = save_temp_wav(wav_bytes, feedback_id)
+            # Tab B: Text -> Audio
+            with gr.Tab("Type -> Translate -> Speak"):
+                gr.Markdown("### Enter text, get translation and synthesized speech")
 
-                status_msg = f"Saved ({duration:.1f}s, {quality_score:.0%} quality)"
+                with gr.Row():
+                    with gr.Column():
+                        text_input = gr.Textbox(
+                            label="Input Text",
+                            lines=4,
+                            placeholder="Type your message in English or Swahili..."
+                        )
 
-                return status_msg, gr.update(visible=True), filepath
+                        with gr.Row():
+                            src_lang_text = gr.Dropdown(
+                                choices=["en", "sw"],
+                                value="en",
+                                label="Source Language"
+                            )
+                            tgt_lang_text = gr.Dropdown(
+                                choices=["en", "sw"],
+                                value="sw",
+                                label="Target Language"
+                            )
 
-            except Exception as e:
-                logger.error(f"Failed to process feedback: {e}")
-                return f"Error: {str(e)}", gr.update(visible=False), None
+                        text_button = gr.Button("Translate + Speak", variant="primary")
 
-        btn_submit_feedback = gr.Button("Submit", variant="primary")
-        btn_submit_feedback.click(
-            process_feedback,
-            inputs=[audio_input, feedback_type, feedback_domain, feedback_language,
-                    feedback_dialect, feedback_phrase, feedback_notes],
-            outputs=[feedback_status, download_file, download_file]
-        )
-    with gr.Tab("About"):
-        gr.Markdown(
-            """
-            ## About Iga TTS
+                    with gr.Column():
+                        translation_text_out = gr.Textbox(label="Translation", lines=4, interactive=False)
+                        audio_text_output = gr.Audio(label="Synthesized Speech", type="numpy")
 
-            **Iga** (Kinyarwanda for "learn") is an AI-powered language learning platform.
+                text_button.click(
+                    fn=pipe_text_to_audio,
+                    inputs=[text_input, src_lang_text, tgt_lang_text],
+                    outputs=[translation_text_out, audio_text_output]
+                )
 
-            ### Features
-            - **Offline Translation** — MarianMT models for en↔rw, fr↔rw
-            - **Text-to-Speech** — Natural pronunciation with Bark
-            - **Two Learning Modes** — Rwanda Mode & Diaspora Mode
-            - **Domain-Based Learning** — 15 semantic domains (Travel, Food, Work, etc.)
-            - **Phrase Packs** — 1,000+ curated phrases organized by context
-            - **Gamification** — XP and streaks (prototype)
-            - **Spaced Repetition Ready** — Infrastructure for SRS scheduling
+                gr.Examples(
+                    examples=[
+                        ["Hello, how are you today?", "en", "sw"],
+                        ["Where is the nearest hospital?", "en", "sw"],
+                        ["Habari za asubuhi", "sw", "en"],
+                        ["Ninahitaji msaada", "sw", "en"],
+                        ["Thank you very much", "en", "sw"]
+                    ],
+                    inputs=[text_input, src_lang_text, tgt_lang_text],
+                    label="Example Phrases"
+                )
 
-            ### Technology
-            - **Translation:** Helsinki-NLP MarianMT
-            - **TTS:** Suno Bark (small model)
-            - **Framework:** Gradio + Transformers
-            - **Corpus:** DuckDB with intelligent domain classification
-            - **Deployment:** Hugging Face Spaces
+        # Advanced Settings
+        with gr.Accordion("Advanced Settings & Info", open=False):
+            gr.Markdown(f"""
+            **Current Configuration:**
+            - Whisper Model: `{WHISPER_MODEL_SIZE}`
+            - Device: `{DEVICE}`
+            - Translation: MarianMT (Helsinki-NLP opus-mt)
+            - TTS: Coqui XTTS-v2
 
-            ### Limitations
-            - Kinyarwanda pronunciation may be imperfect (Bark limitation)
-            - French↔Kinyarwanda uses English bridge translation
-            - XP/streaks are non-persistent (this is a prototype)
+            **Performance Notes:**
+            - CPU: Expect 15-40s end-to-end latency
+            - GPU (T4): Expect 5-15s end-to-end latency
 
-            ---
-            """
-        )
+            **Supported Languages:**
+            - English (en)
+            - Kiswahili / Swahili (sw)
+            """)
 
-        # Show corpus stats if available
-        try:
-            stats = corpus.get_stats()
-            gr.Markdown(
-                f"""
-                ### Corpus Statistics
-                - **Total Phrases:** {stats['total_phrases']}
-                - **Categories:** {', '.join(stats['categories'])}
-                - **Languages:** {', '.join(stats['languages'])}
-                """
-            )
-        except:
-            pass
+        gr.Markdown("""
+        ---
+        **Tips:**
+        - For best STT results, speak clearly and minimize background noise
+        - Translation quality is optimized for conversational text
+        - TTS synthesis may take 10-20 seconds on CPU
+        """)
 
-    logger.info("Setting up Gradio queue...")
-    demo.queue(max_size=Config.QUEUE_MAX_SIZE)
-    logger.info(f"✓ Queue configured (max_size={Config.QUEUE_MAX_SIZE})")
+    return app
 
-logger.info("=" * 80)
-logger.info("APPLICATION INITIALIZATION COMPLETE")
-logger.info("=" * 80)
 
 if __name__ == "__main__":
-    logger.info("=" * 80)
-    logger.info("LAUNCHING GRADIO INTERFACE")
-    logger.info("=" * 80)
-    logger.info(f"Server: 0.0.0.0:{Config.SERVER_PORT}")
-    logger.info(f"Share: True")
+    logger.info("Starting English <-> Swahili Translator...")
 
-    try:
-        demo.launch(
-            server_name="0.0.0.0",
-            server_port=Config.SERVER_PORT,
-            share=True
-        )
-        logger.info("✓ Gradio interface launched successfully")
-    except Exception as e:
-        logger.error(f"✗ Failed to launch Gradio interface: {e}", exc_info=True)
-        raise
+    # Load models
+    load_models()
 
+    # Check critical models
+    if whisper_model is None or translator_en_sw is None or translator_sw_en is None:
+        logger.error("Critical models failed to load. App may have limited functionality.")
 
+    if tts_model is None:
+        logger.warning("TTS model failed to load. Audio output will be unavailable.")
 
+    # Build and launch UI
+    app = build_ui()
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=Config.SERVER_PORT,
+        share=False
+    )
