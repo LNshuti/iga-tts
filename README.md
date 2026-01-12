@@ -1,35 +1,48 @@
 ---
-title: iga-tts
+title: English-Swahili Translator
 app_file: app.py
 sdk: gradio
 sdk_version: 4.44.1
 ---
-# **Iga**: Multilingual translator between English, French, and Kinyarwanda. 
 
-- We use sythentic audio for target phrases using a Transformers TTS model (default: suno/bark-small for speed)
-- The app has two learning modes (Rwanda/Burundi Mode and Diaspora Mode)
-- The app is deployed to Hugging Face Spaces with a Gradio UI and an auto-exposed Inference API
-- Includes example code to use the TTS from the Transformers library directly
+# English <-> Swahili Bidirectional Speech & Text Translator
 
-Features
-- Rwanda Mode and Diaspora Mode switching
-- Offline translation with MarianMT (en↔rw; fr bridged via en)
-- Text-to-speech with suno/bark or suno/bark-small
-- Phrase packs for quick demos
-- Auto-exposed API via Space
+Speak or type in English or Swahili, get translations and natural speech output.
 
-Performance 
-- CPU (free tier): set TTS_MODEL=suno/bark-small to reduce latency
-- GPU (T4/A10G): set TTS_MODEL=suno/bark for higher quality
-- Use queueing (enabled) to stabilize concurrent requests
+## Features
 
-Limitations
-- Bark’s Kinyarwanda pronunciation may be imperfect; this is a prototype
-- MarianMT quality for fr↔rw via en bridge varies
-- Real progress tracking, user auth, and analytics are not included
+- **Speech-to-Text**: Whisper-based transcription with auto language detection
+- **Translation**: MarianMT for accurate en<->sw translation
+- **Text-to-Speech**: Natural voice synthesis with XTTS-v2
+- **Two Modes**: Audio input or text input
+- **Privacy**: All processing happens locally
 
-Next Steps
-- Add microphone input + pronunciation feedback (Whisper or equivalent)
-- Add XP/streak persistence (Supabase/Firebase)
-- Add authentic native voice via custom TTS (dataset + training)
-- Improve fr↔rw translation with dedicated models or custom fine-tuning
+## Models
+
+| Component | Model |
+|-----------|-------|
+| STT | faster-whisper (small) |
+| EN->SW | Helsinki-NLP/opus-mt-en-sw |
+| SW->EN | Helsinki-NLP/opus-mt-sw-en |
+| TTS | Coqui XTTS-v2 |
+
+## Performance
+
+- **CPU (free tier)**: 15-40s end-to-end
+- **GPU (T4)**: 5-15s end-to-end
+
+## Environment Variables
+
+- `WHISPER_MODEL_SIZE`: tiny, base, small (default), medium
+- `DEVICE`: auto (default), cpu, cuda
+
+## Local Development
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+## Deployment
+
+Deployed on Hugging Face Spaces.
