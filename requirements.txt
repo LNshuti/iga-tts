@@ -5,9 +5,6 @@ gradio>=4.44.1
 sentencepiece
 sacremoses
 numpy
-soundfile
-pytest>=7.0.0
-evaluate>=0.4.0
-duckdb>=0.9.0
-scipy>=1.11.0
-cryptography>=41.0.0
+soundfile>=0.12.0
+faster-whisper>=0.10.0
+TTS>=0.22.0
