@@ -44,3 +44,70 @@ The app will launch at `http://localhost:7860`
 ## Deployment
 
 Can be deployed on Hugging Face Spaces or any platform supporting Gradio apps.
+
+## Cloning remaining audio assets 
+### Data Pipeline 
+```bash
+┌─────────────────────┐
+│   phrases.ts        │
+│  (IDs, text,        │
+│   categories)       │
+└─────────┬───────────┘
+          │
+          │ parse_phrases_ts()
+          ▼
+┌─────────────────────┐
+│ all_phrases         │
+│ {phrase_id → text}  │
+└─────────┬───────────┘
+          │
+          │ extract_phrase_categories()
+          ▼
+┌────────────────────────────┐
+│ categories                  │
+│ {phrase_id → category}     │
+└─────────┬──────────────────┘
+          │
+          │
+          │              ┌────────────────────────┐
+          │              │ Recorded audio files   │
+          │              │ (filesystem)           │
+          │              └─────────┬──────────────┘
+          │                        │
+          │                        │ get_recorded_phrase_ids()
+          ▼                        ▼
+┌─────────────────────────────────────────┐
+│ recorded_ids (set[int])                 │
+│ missing_ids (set[int])                  │
+│   ← get_missing_phrase_ids()            │
+└─────────┬───────────────────────────────┘
+          │
+          │ join + classify
+          ▼
+┌─────────────────────────────────────────┐
+│ Phrase classification                   │
+│  - recorded_by_category                 │
+│  - missing_by_category                  │
+│  - flat recorded / missing maps         │
+└─────────┬───────────────────────────────┘
+          │
+          │ add metadata & coverage stats
+          ▼
+┌─────────────────────────────────────────┐
+│ Transcription Dataset (Python dict)     │
+│  metadata                               │
+│  recorded_by_category                   │
+│  missing_by_category                    │
+│  recorded                               │
+│  missing                                │
+└─────────┬───────────────────────────────┘
+          │
+          │ save_json_dataset()
+          ▼
+┌─────────────────────────────────────────┐
+│ transcriptions.json                     │
+│ (ready for TTS + corpus build)          │
+└─────────────────────────────────────────┘
+
+
+```
