@@ -36,8 +36,6 @@ Can be deployed on Hugging Face Spaces or any platform supporting Gradio apps.
 gradio deploy
 ```
 
-Our deployment can be accessed at `https://leoncensh-iga-tts.hf.space`
-
 ## Dependencies
 - **gradio**: Web UI framework
 - **soundfile**: Audio file I/O
