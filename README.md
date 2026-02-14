@@ -22,6 +22,8 @@ A simple web-based tool for recording audio from your microphone, trimming it to
 ## Local Development
 
 ```bash
+conda env create --env=environment.yaml
+conda activate iga-tts
 pip install -r requirements.txt
 python app.py
 ```
