@@ -1,3 +1,9 @@
+---
+title: iga-tts
+app_file: app.py
+sdk: gradio
+sdk_version: 6.6.0
+---
 # Audio Recording & Trimming Tool
 
 A simple web-based tool for recording audio from your microphone, trimming it to the desired length, and downloading as a .wav file.
