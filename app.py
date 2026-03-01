@@ -4,6 +4,7 @@ Simple Audio Recording & Trimming Tool
 Record audio from microphone, trim it, and download as .wav file
 """
 
+import re
 import tempfile
 import gradio as gr
 import soundfile as sf
@@ -86,6 +87,41 @@ def update_selection_info(audio, start_time, end_time):
     selected_duration = end_time - start_time
 
     return f"Selected: {selected_duration:.2f}s / Total: {total_duration:.2f}s"
+
+
+def parse_batch_list(text):
+    """Parse a batch list text into a list of word entries."""
+    if not text or not text.strip():
+        return [], "No batch list provided"
+
+    entries = []
+    current = {}
+
+    for line in text.strip().split("\n"):
+        line = line.strip()
+
+        id_match = re.search(r"ID:\s*(\d+)", line)
+        if id_match:
+            current["id"] = int(id_match.group(1))
+            continue
+
+        kiny_match = re.match(r"Kinyarwanda:\s*(.+)", line)
+        if kiny_match:
+            current["kinyarwanda"] = kiny_match.group(1).strip()
+            continue
+
+        eng_match = re.match(r"English:\s*(.+)", line)
+        if eng_match:
+            current["english"] = eng_match.group(1).strip()
+            if "id" in current and "kinyarwanda" in current:
+                entries.append(dict(current))
+                current = {}
+            continue
+
+    if not entries:
+        return [], "Could not parse any entries. Check format."
+
+    return entries, f"Parsed {len(entries)} words"
 
 
 def build_ui():
