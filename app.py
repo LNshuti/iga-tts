@@ -230,6 +230,7 @@ def export_all(audio, entries, trims):
             wav_path = os.path.join(tmp_dir, f"{word_id}.wav")
             sf.write(wav_path, trimmed, sample_rate)
             zf.write(wav_path, f"{word_id}.wav")
+            os.remove(wav_path)
 
     return zip_path
 
