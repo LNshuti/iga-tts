@@ -160,18 +160,30 @@ def get_current_word_display(entries, current_index, trims):
 
 
 def confirm_and_next(audio, start_time, end_time, entries, trims, current_index):
-    """Save trim points for current word, advance to next."""
+    """Save trim points for current word, advance to next.
+
+    Returns:
+        Tuple of (trims, new_index, display_string, individual_wav_path)
+    """
     if audio is None or not entries:
-        return trims, current_index, "No audio or entries loaded"
+        return trims, current_index, "No audio or entries loaded", None
 
     if current_index >= len(entries):
-        return trims, current_index, get_current_word_display(entries, current_index, trims)
+        return trims, current_index, get_current_word_display(entries, current_index, trims), None
 
     entry = entries[current_index]
     trims[entry["id"]] = (start_time, end_time)
 
+    # Save individual wav file for download
+    sample_rate, audio_data = audio
+    start_sample = int(start_time * sample_rate)
+    end_sample = int(end_time * sample_rate)
+    trimmed = audio_data[start_sample:end_sample]
+    wav_path = os.path.join(tempfile.mkdtemp(), f"{entry['id']}.wav")
+    sf.write(wav_path, trimmed, sample_rate)
+
     new_index = current_index + 1
-    return trims, new_index, get_current_word_display(entries, new_index, trims)
+    return trims, new_index, get_current_word_display(entries, new_index, trims), wav_path
 
 
 def go_back(entries, trims, current_index):
@@ -361,6 +373,8 @@ def build_ui():
                             preview_button = gr.Button("Preview", variant="secondary")
                             confirm_button = gr.Button("Confirm & Next", variant="primary")
 
+                        individual_download = gr.File(label="Download Current Word", visible=False)
+
                         gr.Markdown("#### 4. Export")
                         export_button = gr.Button("Export All as Zip", variant="primary", size="lg")
                         zip_output = gr.File(label="Download Zip")
@@ -406,16 +420,17 @@ def build_ui():
                 )
 
                 def on_confirm(audio, start, end, entries, trims, idx):
-                    trims, new_idx, display = confirm_and_next(
+                    trims, new_idx, display, wav_path = confirm_and_next(
                         audio, start, end, entries, trims, idx
                     )
-                    return trims, new_idx, display
+                    file_update = gr.File(value=wav_path, visible=wav_path is not None)
+                    return trims, new_idx, display, file_update
 
                 confirm_button.click(
                     fn=on_confirm,
                     inputs=[batch_audio, batch_start, batch_end,
                             entries_state, trims_state, index_state],
-                    outputs=[trims_state, index_state, word_display]
+                    outputs=[trims_state, index_state, word_display, individual_download]
                 )
 
                 def on_back(entries, trims, idx):
