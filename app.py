@@ -4,8 +4,10 @@ Simple Audio Recording & Trimming Tool
 Record audio from microphone, trim it, and download as .wav file
 """
 
+import os
 import re
 import tempfile
+import zipfile
 import gradio as gr
 import soundfile as sf
 
@@ -135,6 +137,101 @@ def parse_batch_list(text):
 
     count = len(entries)
     return entries, f"Parsed {count} {'word' if count == 1 else 'words'}"
+
+
+def get_current_word_display(entries, current_index, trims):
+    """Return display string for the current word in the wizard."""
+    if not entries:
+        return "No words loaded. Paste a batch list and click Parse."
+
+    if current_index >= len(entries):
+        confirmed = len(trims)
+        return f"All done! {confirmed}/{len(entries)} words trimmed. Click Export."
+
+    entry = entries[current_index]
+    confirmed = len(trims)
+    total = len(entries)
+    trimmed_mark = " [TRIMMED]" if entry["id"] in trims else ""
+
+    return (
+        f"**Word {current_index + 1} of {total}** (confirmed: {confirmed}) — "
+        f"ID: {entry['id']} — {entry['kinyarwanda']} ({entry['english']}){trimmed_mark}"
+    )
+
+
+def confirm_and_next(audio, start_time, end_time, entries, trims, current_index):
+    """Save trim points for current word, advance to next."""
+    if audio is None or not entries:
+        return trims, current_index, "No audio or entries loaded"
+
+    if current_index >= len(entries):
+        return trims, current_index, get_current_word_display(entries, current_index, trims)
+
+    entry = entries[current_index]
+    trims[entry["id"]] = (start_time, end_time)
+
+    new_index = current_index + 1
+    return trims, new_index, get_current_word_display(entries, new_index, trims)
+
+
+def go_back(entries, trims, current_index):
+    """Go back to previous word."""
+    if current_index <= 0:
+        return current_index, get_current_word_display(entries, 0, trims), None, None
+
+    new_index = current_index - 1
+    entry = entries[new_index]
+
+    if entry["id"] in trims:
+        start, end = trims[entry["id"]]
+        return new_index, get_current_word_display(entries, new_index, trims), start, end
+
+    return new_index, get_current_word_display(entries, new_index, trims), None, None
+
+
+def preview_trim(audio, start_time, end_time):
+    """Return trimmed audio for playback preview."""
+    if audio is None:
+        return None
+
+    sample_rate, audio_data = audio
+    start_sample = int(start_time * sample_rate)
+    end_sample = int(end_time * sample_rate)
+
+    if start_sample >= end_sample:
+        return None
+
+    return (sample_rate, audio_data[start_sample:end_sample])
+
+
+def export_all(audio, entries, trims):
+    """Export all confirmed trims as a zip of {ID}.wav files."""
+    if audio is None or not entries or not trims:
+        return None
+
+    sample_rate, audio_data = audio
+    tmp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(tmp_dir, "trimmed_words.zip")
+
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for entry in entries:
+            word_id = entry["id"]
+            if word_id not in trims:
+                continue
+
+            start_time, end_time = trims[word_id]
+            start_sample = int(start_time * sample_rate)
+            end_sample = int(end_time * sample_rate)
+
+            if start_sample >= end_sample:
+                continue
+
+            trimmed = audio_data[start_sample:end_sample]
+            wav_path = os.path.join(tmp_dir, f"{word_id}.wav")
+            sf.write(wav_path, trimmed, sample_rate)
+            zf.write(wav_path, f"{word_id}.wav")
+
+    return zip_path
 
 
 def build_ui():
