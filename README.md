@@ -38,7 +38,7 @@ Can be deployed on Hugging Face Spaces or any platform supporting Gradio apps.
 gradio deploy
 ```
 
-Current gradio app deployed and available at:  [Space](leoncensh-iga-tts.hf.space) 
+Current gradio app deployed and available at:  [Space](https://leoncensh-iga-tts.hf.space) 
 
 ## Dependencies
 - **gradio**: Web UI framework
