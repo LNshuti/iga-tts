@@ -90,7 +90,19 @@ def update_selection_info(audio, start_time, end_time):
 
 
 def parse_batch_list(text):
-    """Parse a batch list text into a list of word entries."""
+    """Parse a batch list text into a list of word entries.
+
+    Expected format has lines like:
+        ID: 140
+        Kinyarwanda: Inzu
+        English: House
+
+    Args:
+        text: Raw batch list text with ID/Kinyarwanda/English line groups
+
+    Returns:
+        Tuple of (entries list, status message)
+    """
     if not text or not text.strip():
         return [], "No batch list provided"
 
@@ -121,7 +133,8 @@ def parse_batch_list(text):
     if not entries:
         return [], "Could not parse any entries. Check format."
 
-    return entries, f"Parsed {len(entries)} words"
+    count = len(entries)
+    return entries, f"Parsed {count} {'word' if count == 1 else 'words'}"
 
 
 def build_ui():
