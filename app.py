@@ -382,23 +382,8 @@ def build_ui():
                     outputs=[entries_state, trims_state, index_state, parse_status, word_display]
                 )
 
-                def on_batch_audio_change(audio):
-                    if audio is None:
-                        return (
-                            gr.Slider(maximum=1, value=0, interactive=False),
-                            gr.Slider(maximum=1, value=1, interactive=False),
-                            "No audio recorded yet"
-                        )
-                    sample_rate, audio_data = audio
-                    duration = len(audio_data) / sample_rate
-                    return (
-                        gr.Slider(maximum=duration, value=0, interactive=True),
-                        gr.Slider(maximum=duration, value=duration, interactive=True),
-                        f"Total duration: {duration:.2f}s"
-                    )
-
                 batch_audio.change(
-                    fn=on_batch_audio_change,
+                    fn=update_sliders,
                     inputs=[batch_audio],
                     outputs=[batch_start, batch_end, batch_audio_info]
                 )
