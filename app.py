@@ -239,97 +239,217 @@ def build_ui():
     """Build the Gradio interface."""
 
     with gr.Blocks(title="Audio Recording & Trimming Tool") as app:
-        gr.Markdown("""
-        # Audio Recording & Trimming Tool
+        gr.Markdown("# Audio Recording & Trimming Tool")
 
-        Record audio from your microphone, trim it to the desired length, and download as a .wav file.
-        """)
+        with gr.Tabs():
+            with gr.Tab("Single Trim"):
+                gr.Markdown("Record audio, trim it, and download as a .wav file.")
 
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### 1. Record Audio")
-                audio_input = gr.Audio(
-                    sources=["microphone"],
-                    type="numpy",
-                    label="Record Audio",
-                    buttons=[]
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### 1. Record Audio")
+                        audio_input = gr.Audio(
+                            sources=["microphone"],
+                            type="numpy",
+                            label="Record Audio",
+                            buttons=[]
+                        )
+
+                        gr.Markdown("### 2. Trim Audio")
+                        info_text = gr.Textbox(
+                            value="No audio recorded yet",
+                            label="Audio Info",
+                            interactive=False
+                        )
+
+                        start_slider = gr.Slider(
+                            minimum=0, maximum=1, value=0, step=0.01,
+                            label="Start Time (seconds)", interactive=False
+                        )
+
+                        end_slider = gr.Slider(
+                            minimum=0, maximum=1, value=1, step=0.01,
+                            label="End Time (seconds)", interactive=False
+                        )
+
+                        selection_info = gr.Textbox(
+                            value="No audio recorded yet",
+                            label="Selection", interactive=False
+                        )
+
+                        trim_button = gr.Button("Trim & Download", variant="primary", size="lg")
+
+                    with gr.Column():
+                        gr.Markdown("### 3. Download")
+                        audio_output = gr.Audio(
+                            label="Trimmed Audio (Right-click to download)",
+                            type="filepath"
+                        )
+
+                # Single trim event handlers
+                audio_input.change(
+                    fn=update_sliders,
+                    inputs=[audio_input],
+                    outputs=[start_slider, end_slider, info_text]
+                )
+                start_slider.change(
+                    fn=update_selection_info,
+                    inputs=[audio_input, start_slider, end_slider],
+                    outputs=[selection_info]
+                )
+                end_slider.change(
+                    fn=update_selection_info,
+                    inputs=[audio_input, start_slider, end_slider],
+                    outputs=[selection_info]
+                )
+                trim_button.click(
+                    fn=trim_audio,
+                    inputs=[audio_input, start_slider, end_slider],
+                    outputs=[audio_output]
                 )
 
-                gr.Markdown("### 2. Trim Audio")
-                info_text = gr.Textbox(
-                    value="No audio recorded yet",
-                    label="Audio Info",
-                    interactive=False
+            with gr.Tab("Batch Trim"):
+                gr.Markdown("Record all words in one take, paste your batch list, then trim each word.")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 1. Paste Batch List")
+                        batch_text = gr.Textbox(
+                            label="Batch List",
+                            placeholder="Paste your batch list here...",
+                            lines=10
+                        )
+                        parse_button = gr.Button("Parse List", variant="secondary")
+                        parse_status = gr.Textbox(label="Parse Status", interactive=False)
+
+                        gr.Markdown("#### 2. Record All Words")
+                        batch_audio = gr.Audio(
+                            sources=["microphone"],
+                            type="numpy",
+                            label="Record All Words",
+                            buttons=[]
+                        )
+                        batch_audio_info = gr.Textbox(
+                            value="No audio recorded yet",
+                            label="Recording Info",
+                            interactive=False
+                        )
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 3. Trim Each Word")
+                        word_display = gr.Markdown(
+                            "No words loaded. Paste a batch list and click Parse."
+                        )
+
+                        batch_start = gr.Slider(
+                            minimum=0, maximum=1, value=0, step=0.01,
+                            label="Start Time (seconds)", interactive=False
+                        )
+                        batch_end = gr.Slider(
+                            minimum=0, maximum=1, value=1, step=0.01,
+                            label="End Time (seconds)", interactive=False
+                        )
+                        batch_selection = gr.Textbox(
+                            value="No audio recorded yet",
+                            label="Selection", interactive=False
+                        )
+
+                        preview_audio = gr.Audio(label="Preview", type="numpy")
+
+                        with gr.Row():
+                            back_button = gr.Button("Back", variant="secondary")
+                            preview_button = gr.Button("Preview", variant="secondary")
+                            confirm_button = gr.Button("Confirm & Next", variant="primary")
+
+                        gr.Markdown("#### 4. Export")
+                        export_button = gr.Button("Export All as Zip", variant="primary", size="lg")
+                        zip_output = gr.File(label="Download Zip")
+
+                # Gradio State for batch wizard
+                entries_state = gr.State([])
+                trims_state = gr.State({})
+                index_state = gr.State(0)
+
+                # Batch event handlers
+                def on_parse(text):
+                    entries, msg = parse_batch_list(text)
+                    display = get_current_word_display(entries, 0, {})
+                    return entries, {}, 0, msg, display
+
+                parse_button.click(
+                    fn=on_parse,
+                    inputs=[batch_text],
+                    outputs=[entries_state, trims_state, index_state, parse_status, word_display]
                 )
 
-                start_slider = gr.Slider(
-                    minimum=0,
-                    maximum=1,
-                    value=0,
-                    step=0.01,
-                    label="Start Time (seconds)",
-                    interactive=False
+                def on_batch_audio_change(audio):
+                    if audio is None:
+                        return (
+                            gr.Slider(maximum=1, value=0, interactive=False),
+                            gr.Slider(maximum=1, value=1, interactive=False),
+                            "No audio recorded yet"
+                        )
+                    sample_rate, audio_data = audio
+                    duration = len(audio_data) / sample_rate
+                    return (
+                        gr.Slider(maximum=duration, value=0, interactive=True),
+                        gr.Slider(maximum=duration, value=duration, interactive=True),
+                        f"Total duration: {duration:.2f}s"
+                    )
+
+                batch_audio.change(
+                    fn=on_batch_audio_change,
+                    inputs=[batch_audio],
+                    outputs=[batch_start, batch_end, batch_audio_info]
                 )
 
-                end_slider = gr.Slider(
-                    minimum=0,
-                    maximum=1,
-                    value=1,
-                    step=0.01,
-                    label="End Time (seconds)",
-                    interactive=False
+                batch_start.change(
+                    fn=update_selection_info,
+                    inputs=[batch_audio, batch_start, batch_end],
+                    outputs=[batch_selection]
+                )
+                batch_end.change(
+                    fn=update_selection_info,
+                    inputs=[batch_audio, batch_start, batch_end],
+                    outputs=[batch_selection]
                 )
 
-                selection_info = gr.Textbox(
-                    value="No audio recorded yet",
-                    label="Selection",
-                    interactive=False
+                preview_button.click(
+                    fn=preview_trim,
+                    inputs=[batch_audio, batch_start, batch_end],
+                    outputs=[preview_audio]
                 )
 
-                trim_button = gr.Button("Trim & Download", variant="primary", size="lg")
+                def on_confirm(audio, start, end, entries, trims, idx):
+                    trims, new_idx, display = confirm_and_next(
+                        audio, start, end, entries, trims, idx
+                    )
+                    return trims, new_idx, display
 
-            with gr.Column():
-                gr.Markdown("### 3. Download")
-                audio_output = gr.Audio(
-                    label="Trimmed Audio (Right-click to download)",
-                    type="filepath"
+                confirm_button.click(
+                    fn=on_confirm,
+                    inputs=[batch_audio, batch_start, batch_end,
+                            entries_state, trims_state, index_state],
+                    outputs=[trims_state, index_state, word_display]
                 )
 
-        gr.Markdown("""
-        ---
-        **Instructions:**
-        1. Click the microphone icon to start recording
-        2. Speak or play audio
-        3. Click stop when finished
-        4. Adjust the start and end sliders to select the portion you want to keep
-        5. Click "Trim & Download" to generate the trimmed audio
-        6. Right-click on the audio player to download the .wav file
-        """)
+                def on_back(entries, trims, idx):
+                    new_idx, display, start, end = go_back(entries, trims, idx)
+                    if start is not None:
+                        return new_idx, display, gr.Slider(value=start), gr.Slider(value=end)
+                    return new_idx, display, gr.Slider(), gr.Slider()
 
-        # Event handlers
-        audio_input.change(
-            fn=update_sliders,
-            inputs=[audio_input],
-            outputs=[start_slider, end_slider, info_text]
-        )
+                back_button.click(
+                    fn=on_back,
+                    inputs=[entries_state, trims_state, index_state],
+                    outputs=[index_state, word_display, batch_start, batch_end]
+                )
 
-        start_slider.change(
-            fn=update_selection_info,
-            inputs=[audio_input, start_slider, end_slider],
-            outputs=[selection_info]
-        )
-
-        end_slider.change(
-            fn=update_selection_info,
-            inputs=[audio_input, start_slider, end_slider],
-            outputs=[selection_info]
-        )
-
-        trim_button.click(
-            fn=trim_audio,
-            inputs=[audio_input, start_slider, end_slider],
-            outputs=[audio_output]
-        )
+                export_button.click(
+                    fn=export_all,
+                    inputs=[batch_audio, entries_state, trims_state],
+                    outputs=[zip_output]
+                )
 
     return app
 
